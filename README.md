@@ -89,7 +89,6 @@ sequenceDiagram
 ├── scripts/
 │   ├── swarm.py                 # Main orchestrator CLI
 │   ├── check-agents.sh          # Heartbeat entrypoint (check --changes-only)
-│   └── agentctl                 # tmux helper utilities
 └── references/
     └── state-format.md          # JSON output schema reference
 ```

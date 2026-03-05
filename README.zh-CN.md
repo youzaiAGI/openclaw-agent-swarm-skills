@@ -87,7 +87,6 @@ sequenceDiagram
 ├── scripts/
 │   ├── swarm.py                 # 核心编排 CLI
 │   ├── check-agents.sh          # heartbeat 入口（调用 check --changes-only）
-│   └── agentctl                 # tmux session 辅助脚本
 └── references/
     └── state-format.md          # JSON 输出字段参考
 ```
