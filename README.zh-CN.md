@@ -6,6 +6,15 @@
 - 支持任务中途补充指令（attach）
 - 通过 heartbeat 轮询增量状态（`check --changes-only`）
 - 对已结束任务支持 follow-up（新建或复用 worktree）
+- 支持用户按任务显式指定 `codex` 或 `claude`
+
+## 0. 术语说明
+
+`DoD` 是 `Definition of Done`（完成定义），即任务被判定“真正完成”必须满足的客观标准。  
+本项目会自动检查 DoD，包含：
+- 任务状态为 `success`
+- 任务分支相对 base 分支至少有 1 个提交
+- worktree 无未提交改动
 
 ## 1. 项目目标
 
@@ -160,6 +169,11 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
   --repo /path/to/repo \
   --task "实现模板复用功能" \
   --agent codex
+
+python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+  --repo /path/to/repo \
+  --task "实现模板复用功能" \
+  --agent claude
 ```
 
 补充要求（运行中任务）：
@@ -212,6 +226,10 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 - “给这个任务补充要求” -> `attach`
 - “这个任务继续做下一步” -> `spawn-followup`
 - “检查最近有没有状态变化” -> `check --changes-only`
+
+当前已支持在对话中指定 agent：
+- “这个任务用 codex” -> `spawn --agent codex`
+- “这个任务用 claude” -> `spawn --agent claude`
 
 歧义处理：
 - 当 query 命中多个任务时，先返回候选列表，让用户确认 task id。

@@ -8,6 +8,15 @@ An OpenClaw skill for orchestrating multiple coding agents in parallel:
 - Support mid-task redirection via `attach`
 - Track incremental status via heartbeat polling (`check --changes-only`)
 - Continue finished tasks through follow-up flows (new or reused worktree)
+- Let users explicitly choose `codex` or `claude` per task
+
+## 0. Terminology
+
+`DoD` means `Definition of Done`: the objective completion criteria a task must satisfy.
+In this project, DoD is checked automatically and includes:
+- task status is `success`
+- task branch has commits ahead of base branch
+- worktree has no uncommitted changes
 
 ## 1. Goal
 
@@ -162,6 +171,11 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
   --repo /path/to/repo \
   --task "Implement custom template feature" \
   --agent codex
+
+python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+  --repo /path/to/repo \
+  --task "Implement custom template feature" \
+  --agent claude
 ```
 
 Attach:
@@ -214,6 +228,10 @@ Suggested intent mapping:
 - "Add new instruction to this task" -> `attach`
 - "Continue this finished task" -> `spawn-followup`
 - "Check changes only" -> `check --changes-only`
+
+Agent selection in chat is supported now:
+- "Use codex for this task" -> `spawn --agent codex`
+- "Use claude for this task" -> `spawn --agent claude`
 
 For ambiguous task queries, return candidate tasks and ask user to pick one.
 
