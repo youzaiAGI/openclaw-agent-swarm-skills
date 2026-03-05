@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  agentctl start <session> <cmd...>
+  agentctl send <session> <text...>
+  agentctl log <session> [lines]
+  agentctl wait <session> [timeout_sec] [quiet_sec]
+  agentctl stop <session>
+  agentctl status <session>
+
+Examples:
+  agentctl start codex-agent codex
+  agentctl send codex-agent "继续修复失败测试"
+  agentctl wait codex-agent 1800 30
+  agentctl stop codex-agent
+EOF
+}
+
+require_tmux() {
+  command -v tmux >/dev/null 2>&1 || {
+    echo "tmux not found" >&2
+    exit 1
+  }
+}
+
+session_exists() {
+  local s="$1"
+  tmux has-session -t "$s" 2>/dev/null
+}
+
+capture() {
+  local s="$1"
+  tmux capture-pane -t "$s" -p
+}
+
+start_session() {
+  local s="$1"
+  shift
+  if session_exists "$s"; then
+    echo "session exists: $s"
+    return 0
+  fi
+  tmux new-session -d -s "$s" "$*"
+  echo "started: $s -> $*"
+}
+
+send_text() {
+  local s="$1"
+  shift
+  local t="$*"
+  tmux send-keys -t "$s" "$t" C-m
+  echo "sent to $s: $t"
+}
+
+show_log() {
+  local s="$1"
+  local lines="${2:-80}"
+  capture "$s" | tail -n "$lines"
+}
+
+status_session() {
+  local s="$1"
+  if session_exists "$s"; then
+    local pane_pid cmd
+    pane_pid="$(tmux display-message -p -t "$s" "#{pane_pid}")"
+    cmd="$(tmux display-message -p -t "$s" "#{pane_current_command}")"
+    echo "running session=$s pane_pid=$pane_pid cmd=$cmd"
+  else
+    echo "not found: $s"
+    exit 1
+  fi
+}
+
+wait_done() {
+  local s="$1"
+  local timeout="${2:-1800}"
+  local quiet="${3:-30}"
+  local interval=3
+  local start_ts now last_change elapsed idle
+  local content=""
+  local prev_hash=""
+  local hash=""
+
+  # Completion hints (you can tune for your agents).
+  local done_re='(已完成|完成了|任务完成|done|finished|final answer|最终结果|总结如下|completed)'
+  local waiting_re='(请确认|要不要|是否继续|请输入|press enter|continue\?|等待输入|need your input)'
+  local error_re='(traceback|command failed|error:|exception|未处理错误|失败)'
+
+  start_ts="$(date +%s)"
+  last_change="$start_ts"
+
+  while true; do
+    if ! session_exists "$s"; then
+      echo "session ended externally: $s"
+      return 0
+    fi
+
+    content="$(capture "$s" | tail -n 200)"
+    hash="$(printf '%s' "$content" | sha1sum | awk '{print $1}')"
+    if [[ "$hash" != "$prev_hash" ]]; then
+      last_change="$(date +%s)"
+      prev_hash="$hash"
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    idle=$((now - last_change))
+
+    if (( elapsed > timeout )); then
+      echo "timeout after ${timeout}s, keep session alive: $s"
+      return 2
+    fi
+
+    if grep -Eiq "$done_re" <<<"$content"; then
+      if ! grep -Eiq "$waiting_re" <<<"$content" && ! grep -Eiq "$error_re" <<<"$content"; then
+        if (( idle >= quiet )); then
+          echo "done detected + quiet ${idle}s, exiting session: $s"
+          tmux send-keys -t "$s" "/exit" C-m || true
+          sleep 1
+          if session_exists "$s"; then
+            tmux send-keys -t "$s" C-d || true
+            sleep 1
+          fi
+          if session_exists "$s"; then
+            echo "exit signal sent, session still alive: $s"
+            return 3
+          fi
+          echo "session exited: $s"
+          return 0
+        fi
+      fi
+    fi
+
+    sleep "$interval"
+  done
+}
+
+stop_session() {
+  local s="$1"
+  if ! session_exists "$s"; then
+    echo "not found: $s"
+    return 0
+  fi
+  tmux send-keys -t "$s" "/exit" C-m || true
+  sleep 1
+  if session_exists "$s"; then
+    tmux send-keys -t "$s" C-d || true
+    sleep 1
+  fi
+  if session_exists "$s"; then
+    tmux kill-session -t "$s"
+  fi
+  echo "stopped: $s"
+}
+
+main() {
+  require_tmux
+  local sub="${1:-}"
+  case "$sub" in
+    start)
+      [[ $# -ge 3 ]] || { usage; exit 1; }
+      shift
+      local s="$1"
+      shift
+      start_session "$s" "$@"
+      ;;
+    send)
+      [[ $# -ge 3 ]] || { usage; exit 1; }
+      shift
+      local s="$1"
+      shift
+      send_text "$s" "$@"
+      ;;
+    log)
+      [[ $# -ge 2 ]] || { usage; exit 1; }
+      shift
+      show_log "$@"
+      ;;
+    wait)
+      [[ $# -ge 2 ]] || { usage; exit 1; }
+      shift
+      wait_done "$@"
+      ;;
+    stop)
+      [[ $# -eq 2 ]] || { usage; exit 1; }
+      stop_session "$2"
+      ;;
+    status)
+      [[ $# -eq 2 ]] || { usage; exit 1; }
+      status_session "$2"
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
