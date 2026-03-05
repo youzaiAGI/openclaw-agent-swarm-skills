@@ -209,6 +209,21 @@ python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
 
+Publish branch and optionally create PR/MR:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+  --id 20260305-123456-ab12cd \
+  --auto-pr
+```
+
+Create PR/MR manually:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+  --id 20260305-123456-ab12cd
+```
+
 ## 7. Heartbeat Integration (Required)
 
 This repository does not ship a local `HEARTBEAT.md`.
@@ -228,12 +243,18 @@ Suggested intent mapping:
 - "Add new instruction to this task" -> `attach`
 - "Continue this finished task" -> `spawn-followup`
 - "Check changes only" -> `check --changes-only`
+- "Push this finished task and open PR/MR" -> `publish --auto-pr`
+- "Create PR/MR for this task" -> `create-pr`
 
 Agent selection in chat is supported now:
 - "Use codex for this task" -> `spawn --agent codex`
 - "Use claude for this task" -> `spawn --agent claude`
 
 For ambiguous task queries, return candidate tasks and ask user to pick one.
+
+When `check` reports a task moved to `success` with DoD pass, OpenClaw should ask:
+- "Task is done. Do you want to push and create PR/MR now?"
+- Default policy is manual confirmation (no auto publish on heartbeat).
 
 ## 9. Requirements
 

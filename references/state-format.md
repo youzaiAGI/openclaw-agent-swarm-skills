@@ -80,7 +80,59 @@ When task is not running/alive:
     "id": "20260304-204400-ab12cd",
     "status": "running",
     "dod": {"pass": false, "reason": "status_not_success:running"},
+    "publish": {"ok": false},
+    "pr": {"state": "manual_required"},
     "next_step": "attach 补充要求，或等待 heartbeat 下次轮询"
+  }
+}
+```
+
+## publish
+
+```json
+{
+  "ok": true,
+  "id": "20260304-204400-ab12cd",
+  "publish": {
+    "ok": true,
+    "remote": "origin",
+    "remote_branch": "swarm/20260304-204400-ab12cd",
+    "target_branch": "feature/base",
+    "forge": "github"
+  },
+  "pr": {
+    "ok": true,
+    "state": "opened",
+    "url": "https://..."
+  }
+}
+```
+
+If forge CLI is unavailable or create failed, `publish` still returns success for push and includes fallback manual URL:
+
+```json
+{
+  "ok": true,
+  "id": "...",
+  "pr": {
+    "ok": false,
+    "state": "manual_required",
+    "manual_url": "https://.../compare/..."
+  }
+}
+```
+
+## create-pr
+
+```json
+{
+  "ok": true,
+  "id": "20260304-204400-ab12cd",
+  "pr": {
+    "ok": false,
+    "state": "manual_required",
+    "error": "no_supported_pr_cli",
+    "manual_url": "https://..."
   }
 }
 ```
@@ -106,7 +158,8 @@ When task is not running/alive:
         "clean_worktree": true,
         "reason": "ok"
       },
-      "result_excerpt": "..."
+      "result_excerpt": "...",
+      "publish_prompt": "任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？"
     }
   ],
   "tasks": []

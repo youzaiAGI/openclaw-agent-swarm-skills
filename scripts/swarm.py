@@ -3,11 +3,13 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import textwrap
+import urllib.parse
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -377,6 +379,324 @@ def find_task_candidates(tasks: List[Dict[str, Any]], query: str) -> List[Dict[s
     return candidates
 
 
+def parse_remote_url(remote_url: str) -> Dict[str, str]:
+    """Parse git remote URL into forge + host + repo_path."""
+    url = remote_url.strip()
+    host = ''
+    repo_path = ''
+    if url.startswith('http://') or url.startswith('https://'):
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        repo_path = parsed.path.strip('/')
+    else:
+        m = re.match(r'^(?:[^@]+@)?([^:]+):(.+)$', url)
+        if m:
+            host = m.group(1).lower()
+            repo_path = m.group(2).strip('/')
+
+    if repo_path.endswith('.git'):
+        repo_path = repo_path[:-4]
+
+    forge = 'unknown'
+    if 'github' in host:
+        forge = 'github'
+    elif 'gitlab' in host:
+        forge = 'gitlab'
+    elif 'gitea' in host:
+        forge = 'gitea'
+
+    return {'forge': forge, 'host': host, 'repo_path': repo_path, 'remote_url': remote_url}
+
+
+def get_remote_info(worktree: str, remote: str) -> Dict[str, str]:
+    cp = run(['git', 'remote', 'get-url', remote], cwd=worktree, check=False)
+    if cp.returncode != 0:
+        fail(f"remote not found: {remote}")
+    remote_url = (cp.stdout or '').strip()
+    if not remote_url:
+        fail(f"remote url is empty: {remote}")
+    return parse_remote_url(remote_url)
+
+
+def build_manual_pr_url(forge_info: Dict[str, str], source_branch: str, target_branch: str) -> str:
+    forge = forge_info.get('forge', 'unknown')
+    host = forge_info.get('host', '')
+    repo_path = forge_info.get('repo_path', '')
+    if not host or not repo_path:
+        return ''
+
+    if forge == 'github':
+        source = urllib.parse.quote(source_branch, safe='')
+        target = urllib.parse.quote(target_branch, safe='')
+        return f"https://{host}/{repo_path}/compare/{target}...{source}?expand=1"
+    if forge == 'gitlab':
+        source = urllib.parse.quote(source_branch, safe='')
+        target = urllib.parse.quote(target_branch, safe='')
+        return (
+            f"https://{host}/{repo_path}/-/merge_requests/new"
+            f"?merge_request[source_branch]={source}&merge_request[target_branch]={target}"
+        )
+    return ''
+
+
+def ensure_publishable(task: Dict[str, Any]) -> None:
+    if task.get('status') != 'success':
+        fail(f"task is not success: {task.get('status')}")
+    dod = task.get('dod') or evaluate_default_dod(task)
+    task['dod'] = dod
+    if not dod.get('pass'):
+        fail(f"task DoD not pass: {dod.get('reason', 'unknown')}")
+
+
+def run_push(worktree: str, remote: str, branch: str) -> Tuple[bool, str]:
+    cp = run(['git', 'push', '-u', remote, branch], cwd=worktree, check=False)
+    if cp.returncode == 0:
+        return True, ''
+    err = (cp.stderr or cp.stdout or '').strip()
+    return False, err or f'git push failed with code {cp.returncode}'
+
+
+def detect_pr_cli(forge: str) -> str:
+    if forge == 'github' and shutil.which('gh'):
+        return 'gh'
+    if forge == 'gitlab' and shutil.which('glab'):
+        return 'glab'
+    return ''
+
+
+def create_pr_with_cli(
+    cli_name: str,
+    task: Dict[str, Any],
+    target_branch: str,
+    title: str,
+    body: str,
+) -> Tuple[bool, Dict[str, Any]]:
+    worktree = task.get('worktree', '')
+    source_branch = task.get('branch', '')
+
+    if cli_name == 'gh':
+        cmd = [
+            'gh', 'pr', 'create',
+            '--base', target_branch,
+            '--head', source_branch,
+            '--title', title,
+            '--body', body,
+        ]
+        cp = run(cmd, cwd=worktree, check=False)
+        if cp.returncode == 0:
+            url = (cp.stdout or '').strip().splitlines()[-1] if (cp.stdout or '').strip() else ''
+            return True, {'cli': 'gh', 'pr_url': url, 'raw_output': (cp.stdout or '').strip()}
+        return False, {'cli': 'gh', 'error': (cp.stderr or cp.stdout or '').strip()}
+
+    if cli_name == 'glab':
+        cmd = [
+            'glab', 'mr', 'create',
+            '--source-branch', source_branch,
+            '--target-branch', target_branch,
+            '--title', title,
+            '--description', body,
+            '--yes',
+        ]
+        cp = run(cmd, cwd=worktree, check=False)
+        if cp.returncode == 0:
+            text = (cp.stdout or '').strip()
+            mr_url = ''
+            for line in text.splitlines():
+                if line.startswith('http://') or line.startswith('https://'):
+                    mr_url = line.strip()
+            return True, {'cli': 'glab', 'pr_url': mr_url, 'raw_output': text}
+        return False, {'cli': 'glab', 'error': (cp.stderr or cp.stdout or '').strip()}
+
+    return False, {'error': f'unsupported cli: {cli_name}'}
+
+
+def ensure_task_refreshed(tasks: List[Dict[str, Any]], task_id: str, args) -> Dict[str, Any]:
+    idx = next((i for i, t in enumerate(tasks) if t.get('id') == task_id), None)
+    if idx is None:
+        fail(f'task not found: {task_id}')
+    refreshed = update_status(dict(tasks[idx]), args)
+    tasks[idx] = refreshed
+    return refreshed
+
+
+def default_pr_title(task: Dict[str, Any]) -> str:
+    title = (task.get('task') or '').strip()
+    if title:
+        return title[:120]
+    return f"Task {task.get('id', '')}"
+
+
+def default_pr_body(task: Dict[str, Any]) -> str:
+    return (
+        f"Auto-published from openclaw-agent-swarm.\n\n"
+        f"- Task ID: {task.get('id', '')}\n"
+        f"- Agent: {task.get('agent', '')}\n"
+        f"- Source branch: {task.get('branch', '')}\n"
+        f"- Target branch: {task.get('base_branch', '')}\n"
+    )
+
+
+def publish_task(args):
+    tasks = load_tasks()
+    task = ensure_task_refreshed(tasks, args.id, args)
+    ensure_publishable(task)
+
+    worktree = task.get('worktree', '')
+    branch = task.get('branch', '')
+    remote = args.remote
+    target_branch = args.target_branch or task.get('base_branch', '')
+    if not target_branch:
+        fail('target branch is empty; use --target-branch')
+
+    remote_info = get_remote_info(worktree, remote)
+    ok, error = run_push(worktree, remote, branch)
+    task['updated_at'] = dt.datetime.now().isoformat()
+    task['publish'] = {
+        'ok': ok,
+        'remote': remote,
+        'remote_branch': branch,
+        'target_branch': target_branch,
+        'published_at': task['updated_at'] if ok else '',
+        'error': error,
+        'forge': remote_info.get('forge'),
+        'remote_url': remote_info.get('remote_url'),
+    }
+
+    result: Dict[str, Any] = {
+        'ok': ok,
+        'id': task.get('id'),
+        'publish': task['publish'],
+    }
+    if not ok:
+        manual_url = build_manual_pr_url(remote_info, branch, target_branch)
+        if manual_url:
+            result['manual_pr_url'] = manual_url
+        save_tasks(tasks)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.auto_pr:
+        pr_args = argparse.Namespace(
+            id=args.id,
+            remote=remote,
+            target_branch=target_branch,
+            title=args.title,
+            body=args.body,
+            idle_quiet_sec=args.idle_quiet_sec,
+            auto_close_idle_sec=args.auto_close_idle_sec,
+            hard_timeout_sec=args.hard_timeout_sec,
+        )
+        pr_result = create_pr_task(pr_args, tasks=tasks, already_refreshed=True, emit_output=False)
+        task = next((t for t in tasks if t.get('id') == args.id), task)
+        result['pr'] = (pr_result or {}).get('pr', task.get('pr', {}))
+
+    save_tasks(tasks)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def create_pr_task(
+    args,
+    tasks: Optional[List[Dict[str, Any]]] = None,
+    already_refreshed: bool = False,
+    emit_output: bool = True,
+) -> Dict[str, Any]:
+    if tasks is None:
+        tasks = load_tasks()
+    task = ensure_task_refreshed(tasks, args.id, args) if not already_refreshed else next(
+        (t for t in tasks if t.get('id') == args.id), None
+    )
+    if not task:
+        fail(f'task not found: {args.id}')
+
+    worktree = task.get('worktree', '')
+    source_branch = task.get('branch', '')
+    target_branch = args.target_branch or task.get('base_branch', '')
+    if not target_branch:
+        fail('target branch is empty; use --target-branch')
+
+    remote = args.remote
+    remote_info = get_remote_info(worktree, remote)
+    manual_url = build_manual_pr_url(remote_info, source_branch, target_branch)
+
+    # Ensure branch is published before trying PR API.
+    push_ok, push_error = run_push(worktree, remote, source_branch)
+    if not push_ok:
+        task['pr'] = {
+            'ok': False,
+            'state': 'manual_required',
+            'error': f'push_failed_before_pr:{push_error}',
+            'manual_url': manual_url,
+            'forge': remote_info.get('forge'),
+            'remote_url': remote_info.get('remote_url'),
+        }
+        task['updated_at'] = dt.datetime.now().isoformat()
+        if tasks is not None:
+            save_tasks(tasks)
+        payload = {'ok': False, 'id': task.get('id'), 'pr': task['pr']}
+        if emit_output:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
+
+    title = args.title or default_pr_title(task)
+    body = args.body or default_pr_body(task)
+    cli_name = detect_pr_cli(remote_info.get('forge', 'unknown'))
+
+    if not cli_name:
+        task['pr'] = {
+            'ok': False,
+            'state': 'manual_required',
+            'error': 'no_supported_pr_cli',
+            'manual_url': manual_url,
+            'forge': remote_info.get('forge'),
+            'remote_url': remote_info.get('remote_url'),
+        }
+        task['updated_at'] = dt.datetime.now().isoformat()
+        if tasks is not None:
+            save_tasks(tasks)
+        payload = {'ok': True, 'id': task.get('id'), 'pr': task['pr']}
+        if emit_output:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
+
+    created, detail = create_pr_with_cli(cli_name, task, target_branch, title, body)
+    task['updated_at'] = dt.datetime.now().isoformat()
+    if created:
+        task['pr'] = {
+            'ok': True,
+            'state': 'opened',
+            'url': detail.get('pr_url', ''),
+            'cli': cli_name,
+            'forge': remote_info.get('forge'),
+            'remote_url': remote_info.get('remote_url'),
+            'target_branch': target_branch,
+            'source_branch': source_branch,
+        }
+        if tasks is not None:
+            save_tasks(tasks)
+        payload = {'ok': True, 'id': task.get('id'), 'pr': task['pr']}
+        if emit_output:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
+
+    task['pr'] = {
+        'ok': False,
+        'state': 'manual_required',
+        'error': detail.get('error', 'pr_create_failed'),
+        'manual_url': manual_url,
+        'cli': cli_name,
+        'forge': remote_info.get('forge'),
+        'remote_url': remote_info.get('remote_url'),
+        'target_branch': target_branch,
+        'source_branch': source_branch,
+    }
+    if tasks is not None:
+        save_tasks(tasks)
+    payload = {'ok': True, 'id': task.get('id'), 'pr': task['pr']}
+    if emit_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return payload
+
+
 def attach_task(args):
     tasks = load_tasks()
     task = next((t for t in tasks if t.get('id') == args.id), None)
@@ -499,6 +819,10 @@ def update_status(task: Dict[str, Any], args) -> Dict[str, Any]:
     has_wait_marker = text_contains_any(excerpt, WAITING_MARKERS)
 
     new = old
+    idle_quiet_sec = getattr(args, 'idle_quiet_sec', 180)
+    auto_close_idle_sec = getattr(args, 'auto_close_idle_sec', 900)
+    hard_timeout_sec = getattr(args, 'hard_timeout_sec', 7200)
+
     if not alive:
         if exit_file.exists():
             code = exit_file.read_text(encoding='utf-8').strip() or '1'
@@ -515,7 +839,7 @@ def update_status(task: Dict[str, Any], args) -> Dict[str, Any]:
         if pane_cmd in ACTIVE_AGENT_COMMANDS:
             if has_wait_marker:
                 new = 'awaiting_input'
-            elif has_done_marker and idle_sec >= args.auto_close_idle_sec:
+            elif has_done_marker and idle_sec >= auto_close_idle_sec:
                 new = 'auto_closing'
                 if tmux_close_session(session):
                     if exit_file.exists():
@@ -539,14 +863,14 @@ def update_status(task: Dict[str, Any], args) -> Dict[str, Any]:
                     task['exit_code'] = int(code)
                 except Exception:
                     task['exit_code'] = 1
-                if idle_sec >= args.idle_quiet_sec:
+                if idle_sec >= idle_quiet_sec:
                     if tmux_close_session(session):
                         new = 'success' if str(task['exit_code']) == '0' else 'failed'
                     else:
                         new = 'needs_human'
                 else:
                     new = 'auto_closing'
-            elif idle_sec >= args.hard_timeout_sec:
+            elif idle_sec >= hard_timeout_sec:
                 new = 'needs_human'
             else:
                 new = 'running'
@@ -561,10 +885,18 @@ def update_status(task: Dict[str, Any], args) -> Dict[str, Any]:
 
 def task_summary(task: Dict[str, Any]) -> Dict[str, Any]:
     status = task.get('status', 'unknown')
+    publish = task.get('publish') or {}
+    pr = task.get('pr') or {}
     if status in {'running', 'awaiting_input'}:
         next_step = 'attach 补充要求，或等待 heartbeat 下次轮询'
     elif status in {'success'}:
-        next_step = '查看提交并创建/检查 PR'
+        if publish.get('ok'):
+            if pr.get('ok'):
+                next_step = 'PR/MR 已创建，继续评审与合并'
+            else:
+                next_step = '分支已推送，执行 create-pr 或按手工链接创建 PR/MR'
+        else:
+            next_step = '任务已完成，是否执行 publish --auto-pr 推送并创建 PR/MR'
     elif status in {'failed', 'needs_human'}:
         next_step = '查看日志并 attach 修正，或创建 follow-up 任务'
     else:
@@ -579,6 +911,8 @@ def task_summary(task: Dict[str, Any]) -> Dict[str, Any]:
         'tmux_session': task.get('tmux_session'),
         'status': status,
         'dod': task.get('dod', {}),
+        'publish': publish,
+        'pr': pr,
         'result_excerpt': (task.get('result_excerpt') or '')[-400:],
         'next_step': next_step,
     }
@@ -598,6 +932,8 @@ def check_tasks(args):
         latest[tid] = status
         prev = last.get(tid)
         if prev != status:
+            publish = t.get('publish') or {}
+            should_prompt_publish = status == 'success' and (t.get('dod') or {}).get('pass') and not publish.get('ok')
             changes.append({
                 'id': tid,
                 'repo': t.get('repo'),
@@ -607,6 +943,10 @@ def check_tasks(args):
                 'to': status,
                 'dod': t.get('dod', {}),
                 'result_excerpt': (t.get('result_excerpt') or '')[-300:],
+                'publish_prompt': (
+                    '任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？'
+                    if should_prompt_publish else ''
+                ),
             })
 
     save_json(GLOBAL_LAST_CHECK_PATH, latest)
@@ -716,6 +1056,29 @@ def main():
     p_status.add_argument('--auto-close-idle-sec', type=int, default=900)
     p_status.add_argument('--hard-timeout-sec', type=int, default=7200)
     p_status.set_defaults(func=status_task)
+
+    p_publish = sub.add_parser('publish')
+    p_publish.add_argument('--id', required=True)
+    p_publish.add_argument('--remote', default='origin')
+    p_publish.add_argument('--target-branch')
+    p_publish.add_argument('--auto-pr', action='store_true')
+    p_publish.add_argument('--title')
+    p_publish.add_argument('--body')
+    p_publish.add_argument('--idle-quiet-sec', type=int, default=180)
+    p_publish.add_argument('--auto-close-idle-sec', type=int, default=900)
+    p_publish.add_argument('--hard-timeout-sec', type=int, default=7200)
+    p_publish.set_defaults(func=publish_task)
+
+    p_pr = sub.add_parser('create-pr')
+    p_pr.add_argument('--id', required=True)
+    p_pr.add_argument('--remote', default='origin')
+    p_pr.add_argument('--target-branch')
+    p_pr.add_argument('--title')
+    p_pr.add_argument('--body')
+    p_pr.add_argument('--idle-quiet-sec', type=int, default=180)
+    p_pr.add_argument('--auto-close-idle-sec', type=int, default=900)
+    p_pr.add_argument('--hard-timeout-sec', type=int, default=7200)
+    p_pr.set_defaults(func=create_pr_task)
 
     p_list = sub.add_parser('list')
     p_list.set_defaults(func=list_tasks)

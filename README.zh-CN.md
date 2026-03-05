@@ -207,6 +207,21 @@ python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
 
+发布分支并可选自动创建 PR/MR：
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+  --id 20260305-123456-ab12cd \
+  --auto-pr
+```
+
+显式创建 PR/MR：
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+  --id 20260305-123456-ab12cd
+```
+
 ## 7. Heartbeat 集成（重要）
 
 本项目不提供自己的 `HEARTBEAT.md`。
@@ -226,6 +241,8 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 - “给这个任务补充要求” -> `attach`
 - “这个任务继续做下一步” -> `spawn-followup`
 - “检查最近有没有状态变化” -> `check --changes-only`
+- “把这个完成任务推到远程并建 PR/MR” -> `publish --auto-pr`
+- “给这个任务建 PR/MR” -> `create-pr`
 
 当前已支持在对话中指定 agent：
 - “这个任务用 codex” -> `spawn --agent codex`
@@ -233,6 +250,10 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 
 歧义处理：
 - 当 query 命中多个任务时，先返回候选列表，让用户确认 task id。
+
+当 `check` 检测到任务变为 `success` 且 DoD 通过时：
+- OpenClaw 需要提示用户是否现在执行 push + PR/MR。
+- 默认策略是手动确认后再发布，不在 heartbeat 中自动发布。
 
 ## 9. 运行依赖
 

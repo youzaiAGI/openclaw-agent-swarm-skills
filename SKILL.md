@@ -94,6 +94,27 @@ python3 "$SKILL_ROOT/scripts/swarm.py" check
 python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
 ```
 
+Publish finished task branch to remote:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+  --id <task_id> \
+  [--remote origin] \
+  [--target-branch <base_branch>] \
+  [--auto-pr]
+```
+
+Create PR/MR explicitly:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+  --id <task_id> \
+  [--remote origin] \
+  [--target-branch <base_branch>] \
+  [--title "<title>"] \
+  [--body "<body>"]
+```
+
 Heartbeat wrapper:
 
 ```bash
@@ -120,6 +141,8 @@ Natural language intents map to commands:
 - “给这个任务补充要求” -> `attach`
 - “如果结束了继续做” -> `spawn-followup --worktree-mode new|reuse` (ask user first)
 - “轮询有没有变化” -> `check --changes-only`
+- “把这个任务推到远程” -> `publish`
+- “给这个任务创建PR/MR” -> `create-pr`
 
 Follow-up routing policy:
 - If task is `running/awaiting_input`: use `attach`.
@@ -129,6 +152,10 @@ Follow-up routing policy:
 - Reuse worktree: `spawn-followup --worktree-mode reuse` (guarded)
 
 If query is ambiguous, return candidate tasks and ask user to pick one.
+
+When `check --changes-only` reports task changed to `success` and DoD passes:
+- OpenClaw should prompt user: “任务已完成，是否现在 push 并创建 PR/MR？”
+- Do not auto-publish by default; wait for user confirmation.
 
 ## Response style
 
