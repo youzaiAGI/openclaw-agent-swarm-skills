@@ -32,7 +32,7 @@
 ```mermaid
 flowchart LR
     U[User] --> OC[OpenClaw Main Agent]
-    OC --> S[openclaw-agent-swarm\nSKILL.md + scripts/swarm.py]
+    OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/SKILL.md + skills/openclaw-agent-swarm/scripts/swarm.js]
 
     S --> T1[tmux session A]
     S --> T2[tmux session B]
@@ -60,7 +60,7 @@ flowchart LR
 sequenceDiagram
     participant User
     participant OpenClaw
-    participant Swarm as swarm.py
+    participant Swarm as swarm.js
     participant Tmux
     participant Agent as Codex/Claude
     participant Registry as task registry
@@ -92,12 +92,17 @@ sequenceDiagram
 
 ```text
 .
-├── SKILL.md                     # OpenClaw 读取的技能说明与对话映射
-├── scripts/
-│   ├── swarm.py                 # 核心编排 CLI
-│   ├── check-agents.sh          # heartbeat 入口（调用 check --changes-only）
-└── references/
-    └── state-format.md          # JSON 输出字段参考
+├── code/                        # 开发源码目录
+│   ├── src/swarm.ts             # TypeScript 主实现
+│   ├── legacy/swarm.py          # Python 基线实现（对照）
+│   ├── scripts/parity-check.ts  # Python/TS 行为一致性检查
+│   └── package.json             # 构建工具链
+├── skills/openclaw-agent-swarm/ # 可直接分发的 skill 目录
+│   ├── SKILL.md
+│   ├── scripts/swarm.js
+│   ├── scripts/check-agents.sh
+│   └── references/state-format.md
+└── build-skill.sh               # 编译并覆盖 skills/openclaw-agent-swarm/scripts/swarm.js
 ```
 
 ## 5. 核心能力与设计细节
@@ -162,15 +167,27 @@ sequenceDiagram
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
+推荐运行入口（Node 18+，运行时不依赖 npm 包安装）：
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
+```
+
+从源码构建并更新 skill 运行文件：
+
+```bash
+./build-skill.sh
+```
+
 创建任务：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --task "实现模板复用功能" \
   --agent codex
 
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --task "实现模板复用功能" \
   --agent claude
@@ -179,7 +196,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
 补充要求（运行中任务）：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" attach \
+node "$SKILL_ROOT/scripts/swarm.js" attach \
   --id 20260305-123456-ab12cd \
   --message "先做 API 层，UI 延后"
 ```
@@ -187,14 +204,14 @@ python3 "$SKILL_ROOT/scripts/swarm.py" attach \
 查询状态：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" status --id 20260305-123456-ab12cd
-python3 "$SKILL_ROOT/scripts/swarm.py" status --query templates
+node "$SKILL_ROOT/scripts/swarm.js" status --id 20260305-123456-ab12cd
+node "$SKILL_ROOT/scripts/swarm.js" status --query templates
 ```
 
 follow-up（已结束任务）：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
+node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from 20260305-123456-ab12cd \
   --task "补充审查意见修复" \
   --worktree-mode new
@@ -203,14 +220,14 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
 轮询检查：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
 
 发布分支并可选自动创建 PR/MR：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+node "$SKILL_ROOT/scripts/swarm.js" publish \
   --id 20260305-123456-ab12cd \
   --auto-pr
 ```
@@ -218,7 +235,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" publish \
 显式创建 PR/MR：
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+node "$SKILL_ROOT/scripts/swarm.js" create-pr \
   --id 20260305-123456-ab12cd
 ```
 

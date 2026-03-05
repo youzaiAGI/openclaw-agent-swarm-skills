@@ -45,10 +45,16 @@ Set reusable root:
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
+Preferred runtime (no npm runtime dependency, Node 18+):
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
+```
+
 Spawn task:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo <git_repo_path> \
   --task "<task description>" \
   [--agent codex|claude] \
@@ -58,7 +64,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
 Spawn follow-up task from existing task:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
+node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --task "<followup instruction>" \
   --worktree-mode new|reuse \
@@ -69,7 +75,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
 Attach extra instruction to running task:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" attach \
+node "$SKILL_ROOT/scripts/swarm.js" attach \
   --id <task_id> \
   --message "<extra instruction>"
 ```
@@ -77,27 +83,27 @@ python3 "$SKILL_ROOT/scripts/swarm.py" attach \
 Status query:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" status --id <task_id>
-python3 "$SKILL_ROOT/scripts/swarm.py" status --query "<id|branch|session|keyword>"
+node "$SKILL_ROOT/scripts/swarm.js" status --id <task_id>
+node "$SKILL_ROOT/scripts/swarm.js" status --query "<id|branch|session|keyword>"
 ```
 
 List tasks:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" list
+node "$SKILL_ROOT/scripts/swarm.js" list
 ```
 
 Check tasks (full or changes-only):
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" check
-python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" check
+node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```
 
 Publish finished task branch to remote:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+node "$SKILL_ROOT/scripts/swarm.js" publish \
   --id <task_id> \
   [--remote origin] \
   [--target-branch <base_branch>] \
@@ -107,7 +113,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" publish \
 Create PR/MR explicitly:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+node "$SKILL_ROOT/scripts/swarm.js" create-pr \
   --id <task_id> \
   [--remote origin] \
   [--target-branch <base_branch>] \

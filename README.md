@@ -34,7 +34,7 @@ Design goals:
 ```mermaid
 flowchart LR
     U[User] --> OC[OpenClaw Main Agent]
-    OC --> S[openclaw-agent-swarm\nSKILL.md + scripts/swarm.py]
+    OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/SKILL.md + skills/openclaw-agent-swarm/scripts/swarm.js]
 
     S --> T1[tmux session A]
     S --> T2[tmux session B]
@@ -62,7 +62,7 @@ flowchart LR
 sequenceDiagram
     participant User
     participant OpenClaw
-    participant Swarm as swarm.py
+    participant Swarm as swarm.js
     participant Tmux
     participant Agent as Codex/Claude
     participant Registry as task registry
@@ -94,12 +94,17 @@ sequenceDiagram
 
 ```text
 .
-├── SKILL.md                     # OpenClaw-facing skill instructions and chat mapping
-├── scripts/
-│   ├── swarm.py                 # Main orchestrator CLI
-│   ├── check-agents.sh          # Heartbeat entrypoint (check --changes-only)
-└── references/
-    └── state-format.md          # JSON output schema reference
+├── code/                        # Source of truth (development)
+│   ├── src/swarm.ts             # TypeScript implementation
+│   ├── legacy/swarm.py          # Python baseline for parity checks
+│   ├── scripts/parity-check.ts  # Python/TS behavior parity tests
+│   └── package.json             # Build toolchain
+├── skills/openclaw-agent-swarm/ # Ship-ready skill payload
+│   ├── SKILL.md
+│   ├── scripts/swarm.js
+│   ├── scripts/check-agents.sh
+│   └── references/state-format.md
+└── build-skill.sh               # Build TS and sync skills/openclaw-agent-swarm/scripts/swarm.js
 ```
 
 ## 5. Core Behavior
@@ -164,15 +169,27 @@ Set skill root:
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
+Preferred runtime (Node 18+, no npm runtime dependency):
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
+```
+
+Build/update skill runtime artifact from source:
+
+```bash
+./build-skill.sh
+```
+
 Spawn:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --task "Implement custom template feature" \
   --agent codex
 
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --task "Implement custom template feature" \
   --agent claude
@@ -181,7 +198,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
 Attach:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" attach \
+node "$SKILL_ROOT/scripts/swarm.js" attach \
   --id 20260305-123456-ab12cd \
   --message "Prioritize API layer first"
 ```
@@ -189,14 +206,14 @@ python3 "$SKILL_ROOT/scripts/swarm.py" attach \
 Status:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" status --id 20260305-123456-ab12cd
-python3 "$SKILL_ROOT/scripts/swarm.py" status --query templates
+node "$SKILL_ROOT/scripts/swarm.js" status --id 20260305-123456-ab12cd
+node "$SKILL_ROOT/scripts/swarm.js" status --query templates
 ```
 
 Follow-up:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
+node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from 20260305-123456-ab12cd \
   --task "Address review feedback" \
   --worktree-mode new
@@ -205,14 +222,14 @@ python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
 Heartbeat check:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
 
 Publish branch and optionally create PR/MR:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" publish \
+node "$SKILL_ROOT/scripts/swarm.js" publish \
   --id 20260305-123456-ab12cd \
   --auto-pr
 ```
@@ -220,7 +237,7 @@ python3 "$SKILL_ROOT/scripts/swarm.py" publish \
 Create PR/MR manually:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/swarm.py" create-pr \
+node "$SKILL_ROOT/scripts/swarm.js" create-pr \
   --id 20260305-123456-ab12cd
 ```
 

@@ -10,7 +10,9 @@ __pycache__/
 .Python
 build/
 develop-eggs/
+# dist/ for root is not used
 dist/
+code/dist/
 downloads/
 eggs/
 .eggs/
@@ -200,6 +202,9 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Node
+node_modules/
 
 # Marimo
 marimo/_static/
