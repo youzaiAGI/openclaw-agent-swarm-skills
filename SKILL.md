@@ -1,132 +1,144 @@
 ---
 name: openclaw-agent-swarm
-description: Orchestrate background coding agents with git worktree + tmux, including task spawn, task follow-up (attach), and heartbeat-friendly status change reporting via check-agents.sh. Use when user wants one main OpenClaw agent to dispatch multiple coding tasks in parallel while continuing chat, enforce git-repo-only execution, detect Codex/Claude availability, and receive only incremental task status updates.
+description: Orchestrate parallel coding agents with git worktree + tmux. Supports spawn, follow-up (new/reuse worktree), attach mid-task instructions, heartbeat-driven incremental status checks, and concise progress cards for OpenClaw chat.
 ---
 
 # OpenClaw Agent Swarm
 
-Use this skill to run coding tasks as background jobs with `worktree + tmux` and manage them from the main chat.
+Use this skill to run coding tasks as background tmux sessions with isolated git worktrees, while keeping OpenClaw chat responsive.
 
 ## Hard Rules
 
 1. Refuse execution when target directory is not a git repository.
 2. Detect local tools before spawn:
-   - If neither `codex` nor `claude` exists, stop and tell user to install at least one.
-   - If user specifies `codex` or `claude`, honor it.
-   - If user does not specify, auto-pick in order: `codex` then `claude`.
-3. Keep main chat responsive: spawn task in background and return task id/session/worktree immediately.
-4. For follow-up instructions on an existing task, use attach mode (send text into that tmux session).
-5. Heartbeat/status reporting must be incremental: only report changed tasks since last check.
-6. DoD uses default built-in validation only (no project-specific config/scripts):
-   - status must be `success`
-   - task branch has at least one commit ahead of base branch
-   - worktree is clean (`git status --porcelain` empty)
-7. Agent CLI is launched in non-interactive dangerous mode by default (to avoid blocking approvals in tmux background runs):
-   - codex: `--dangerously-bypass-approvals-and-sandbox`
-   - claude: `--dangerously-skip-permissions`
+- If neither `codex` nor `claude` exists, stop and ask user to install at least one.
+- If user specifies `codex` or `claude`, honor it.
+- If user does not specify, auto-pick: `codex` first, then `claude`.
+3. Keep main chat async: return spawn result immediately (task id/session/worktree/branch).
+4. Agent runtime uses tmux interactive sessions, so follow-up instructions are sent via `attach`.
+5. Heartbeat reporting must be incremental: only return changed tasks on each check.
+6. DoD uses default built-in checks only:
+- task status is `success`
+- task branch has commits ahead of base branch
+- worktree is clean (`git status --porcelain` empty)
+7. If attaching to a non-running task, do not silently send. Return `requires_confirmation` with next action choices.
 
-## Global task registry (cross-repo)
+## Global state
 
-All tasks (repo A/B/C/...) are aggregated into one summary file:
-
+Global task registry and heartbeat state:
 - `~/.openclaw/agent-swarm/agent-swarm-tasks.json`
+- `~/.openclaw/agent-swarm/agent-swarm-last-check.json`
 
-Each task records:
-- repo path
-- worktree path
-- tmux session
-- branch
-- status
-- log / exit file path
+Runtime artifacts:
+- `~/.openclaw/agent-swarm/logs/<task_id>.log`
+- `~/.openclaw/agent-swarm/logs/<task_id>.exit`
+- `~/.openclaw/agent-swarm/prompts/<task_id>.txt`
 
-This enables one check script to monitor all tasks across repositories.
+Worktree root:
+- `~/.openclaw/agent-swarm/worktree/<repo-name>/<task_id>`
 
 ## Commands
 
-All commands use `scripts/swarm.py`.
-
-### 1) Spawn task
+Set reusable root:
 
 ```bash
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py spawn \
+SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
+```
+
+Spawn task:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" spawn \
   --repo <git_repo_path> \
   --task "<task description>" \
   [--agent codex|claude] \
   [--name <task_name>]
 ```
 
-### 2) Attach follow-up to existing task
+Spawn follow-up task from existing task:
 
 ```bash
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py attach \
+python3 "$SKILL_ROOT/scripts/swarm.py" spawn-followup \
+  --from <task_id> \
+  --task "<followup instruction>" \
+  --worktree-mode new|reuse \
+  [--agent codex|claude] \
+  [--name <task_name>]
+```
+
+Attach extra instruction to running task:
+
+```bash
+python3 "$SKILL_ROOT/scripts/swarm.py" attach \
   --id <task_id> \
   --message "<extra instruction>"
 ```
 
-### 3) List all tasks (from global registry)
+Status query:
 
 ```bash
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py list
+python3 "$SKILL_ROOT/scripts/swarm.py" status --id <task_id>
+python3 "$SKILL_ROOT/scripts/swarm.py" status --query "<id|branch|session|keyword>"
 ```
 
-### 4) Check tasks (full)
+List tasks:
 
 ```bash
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py check
+python3 "$SKILL_ROOT/scripts/swarm.py" list
 ```
 
-### 5) Check tasks (incremental changes only)
+Check tasks (full or changes-only):
 
 ```bash
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py check --changes-only
+python3 "$SKILL_ROOT/scripts/swarm.py" check
+python3 "$SKILL_ROOT/scripts/swarm.py" check --changes-only
 ```
 
-### 6) Heartbeat script (recommended)
+Heartbeat wrapper:
 
 ```bash
-bash /root/openclaw-skills/openclaw-agent-swarm/scripts/check-agents.sh
+bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
 
-This wrapper returns only changes by default and is intended for heartbeat calls.
+## Heartbeat Requirement
 
-## Main-agent response style
+This skill expects OpenClaw heartbeat polling to be configured.
 
-After spawn, always return:
-- task id
-- selected agent
-- repo path
-- worktree path
-- tmux session name
-- branch
+You must configure heartbeat in OpenClaw built-in `HEARTBEAT.md` (not this repo) to run:
 
-After attach, always return:
-- target task id
-- whether message was successfully sent
+```bash
+bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
+```
 
-After check:
-- If no changes: return a short “no task status changes” message.
-- If changed: summarize only changed tasks with `from -> to` plus short result excerpt.
-- Never dump raw JSON to user by default; convert to readable status cards.
+Without heartbeat, task status transitions (`running -> success/failed/needs_human`) may not be updated in time.
 
-Readable output template:
+## OpenClaw chat mapping
+
+Natural language intents map to commands:
+- “开个并发任务” -> `spawn`
+- “看看这个任务进展” -> `status --id` or `status --query`
+- “给这个任务补充要求” -> `attach`
+- “如果结束了继续做” -> `spawn-followup --worktree-mode new|reuse` (ask user first)
+- “轮询有没有变化” -> `check --changes-only`
+
+Follow-up routing policy:
+- If task is `running/awaiting_input`: use `attach`.
+- If task is ended (`success/failed/stopped/needs_human`): do not attach directly.
+- Return `requires_confirmation`, then ask user:
+- New worktree: `spawn-followup --worktree-mode new`
+- Reuse worktree: `spawn-followup --worktree-mode reuse` (guarded)
+
+If query is ambiguous, return candidate tasks and ask user to pick one.
+
+## Response style
+
+For user-facing replies, convert JSON to concise cards. Do not dump raw JSON by default.
+
+Card template:
 - 任务: `<task_id>` (`<agent>` | `<repo>`)
-- 状态: `<from> -> <to>`
+- 状态: `<status>`
 - 摘要: `<result_excerpt key points>`
 - DoD: `pass/fail` + `reason`
-- 下一步: `attach补充指令 / 重试 / 人工处理建议`
+- 下一步: `attach补充指令 / follow-up(new|reuse) / 人工处理`
 
-## Files used
-
-Global registry and check state:
-- `~/.openclaw/agent-swarm/agent-swarm-tasks.json`
-- `~/.openclaw/agent-swarm/agent-swarm-last-check.json`
-
-Global runtime files:
-- `~/.openclaw/agent-swarm/logs/<task_id>.log`
-- `~/.openclaw/agent-swarm/logs/<task_id>.exit`
-- `~/.openclaw/agent-swarm/prompts/<task_id>.txt`
-
-Global worktree root:
-- `~/.openclaw/agent-swarm/worktree/<repo-name>/<task_id>`
-
-See `references/state-format.md` for output JSON fields.
+See `references/state-format.md` for JSON fields.

@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python3 /root/openclaw-skills/openclaw-agent-swarm/scripts/swarm.py check --changes-only
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/swarm.py" check --changes-only
