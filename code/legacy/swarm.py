@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.parse
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -106,6 +107,13 @@ def pick_agent(requested: Optional[str], tools: Dict[str, bool]) -> str:
     fail('neither codex nor claude is installed')
 
 
+def validate_agent_command(agent: str) -> None:
+    cp = run([agent, '--help'], check=False)
+    if cp.returncode != 0:
+        err = (cp.stderr or cp.stdout or '').strip()
+        fail(f"agent command '{agent}' exists but '--help' failed: {err or 'unknown error'}")
+
+
 def now_id() -> str:
     t = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
     return f'{t}-{uuid.uuid4().hex[:6]}'
@@ -167,7 +175,7 @@ def prepare_reused_worktree(parent: Dict[str, Any]) -> Tuple[bool, str, Dict[str
     }
 
 
-def build_agent_start_command(agent: str, log_path: pathlib.Path, exit_path: pathlib.Path) -> str:
+def build_agent_start_command(agent: str, exit_path: pathlib.Path) -> str:
     if agent == 'codex':
         base = 'codex --dangerously-bypass-approvals-and-sandbox'
     elif agent == 'claude':
@@ -177,8 +185,8 @@ def build_agent_start_command(agent: str, log_path: pathlib.Path, exit_path: pat
 
     return (
         'set -o pipefail; '
-        f'{base} 2>&1 | tee -a {shlex.quote(str(log_path))}; '
-        'ec=${PIPESTATUS[0]}; '
+        f'{base}; '
+        'ec=$?; '
         f'echo "$ec" > {shlex.quote(str(exit_path))}; '
         'exec bash'
     )
@@ -199,6 +207,27 @@ def tmux_current_command(session: str) -> str:
     if cp.returncode != 0:
         return ''
     return (cp.stdout or '').strip().lower()
+
+
+def is_agent_pane_command(cmd: str, agent: str) -> bool:
+    if not cmd:
+        return False
+    if cmd == agent:
+        return True
+    # Some wrappers may show node as pane current command.
+    return cmd == 'node'
+
+
+def wait_for_agent_ready(session: str, agent: str, timeout_sec: int = 20) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if not tmux_alive(session):
+            return False
+        cmd = tmux_current_command(session)
+        if is_agent_pane_command(cmd, agent):
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def tmux_close_session(session: str) -> bool:
@@ -272,9 +301,14 @@ def spawn_in_tmux(
 
     prompt_text = build_prompt(task_id, repo, worktree_meta['worktree'], user_task, parent_task_id)
     prompt_path.write_text(prompt_text, encoding='utf-8')
+    log_path.write_text('', encoding='utf-8')
 
-    cmd = build_agent_start_command(agent, log_path, exit_path)
+    cmd = build_agent_start_command(agent, exit_path)
     run(['tmux', 'new-session', '-d', '-s', session, '-c', worktree_meta['worktree'], 'bash', '-lc', cmd])
+    run(['tmux', 'pipe-pane', '-o', '-t', session, f"cat >> {shlex.quote(str(log_path))}"], check=False)
+    if not wait_for_agent_ready(session, agent, 20):
+        tmux_close_session(session)
+        fail(f'agent process did not become ready in tmux session: {session}')
     tmux_send_text(session, prompt_text)
 
     now = dt.datetime.now().isoformat()
@@ -313,6 +347,7 @@ def spawn_task(args):
 
     tasks = load_tasks()
     agent = pick_agent(args.agent, tools)
+    validate_agent_command(agent)
     task_id = args.name or now_id()
     ensure_unique_task_id(task_id, tasks)
 
@@ -338,6 +373,7 @@ def spawn_followup_task(args):
         fail('git is not installed')
 
     agent = pick_agent(args.agent, tools)
+    validate_agent_command(agent)
     task_id = args.name or now_id()
     ensure_unique_task_id(task_id, tasks)
 

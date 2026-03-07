@@ -82,6 +82,13 @@ function pickAgent(requested, tools) {
         return 'claude';
     fail('neither codex nor claude is installed');
 }
+function validateAgentCommand(agent) {
+    const cp = run([agent, '--help'], undefined, false);
+    if (cp.code !== 0) {
+        const err = (cp.stderr || cp.stdout || '').trim();
+        fail(`agent command '${agent}' exists but '--help' failed: ${err || 'unknown error'}`);
+    }
+}
 function nowId() {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
@@ -112,6 +119,9 @@ function createWorktree(repo, taskId) {
     run(['git', 'worktree', 'add', '-b', branch, wt, baseBranch], repo);
     return { worktree: wt, branch, base_branch: baseBranch };
 }
+function shellQuote(s) {
+    return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 function prepareReusedWorktree(parent) {
     const wt = parent.worktree || '';
     const repo = parent.repo || '';
@@ -133,7 +143,7 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:branch_unresolvable', {}];
     return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
-function buildAgentStartCommand(agent, logPath, exitPath) {
+function buildAgentStartCommand(agent, exitPath) {
     let base = '';
     if (agent === 'codex')
         base = 'codex --dangerously-bypass-approvals-and-sandbox';
@@ -141,12 +151,11 @@ function buildAgentStartCommand(agent, logPath, exitPath) {
         base = 'claude --dangerously-skip-permissions';
     else
         fail(`unsupported agent: ${agent}`);
-    const q = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
     return [
         'set -o pipefail;',
-        `${base} 2>&1 | tee -a ${q(logPath)};`,
-        'ec=${PIPESTATUS[0]};',
-        `echo "$ec" > ${q(exitPath)};`,
+        `${base};`,
+        'ec=$?;',
+        `echo "$ec" > ${shellQuote(exitPath)};`,
         'exec bash',
     ].join(' ');
 }
@@ -163,6 +172,31 @@ function tmuxCurrentCommand(session) {
     if (cp.code !== 0)
         return '';
     return cp.stdout.trim().toLowerCase();
+}
+function sleepMs(ms) {
+    const sab = new SharedArrayBuffer(4);
+    const arr = new Int32Array(sab);
+    Atomics.wait(arr, 0, 0, ms);
+}
+function isAgentPaneCommand(cmd, agent) {
+    if (!cmd)
+        return false;
+    if (cmd === agent)
+        return true;
+    // Some wrappers may still show node as current command.
+    return cmd === 'node';
+}
+function waitForAgentReady(session, agent, timeoutSec = 20) {
+    const deadline = Date.now() + timeoutSec * 1000;
+    while (Date.now() < deadline) {
+        if (!tmuxAlive(session))
+            return false;
+        const cmd = tmuxCurrentCommand(session);
+        if (isAgentPaneCommand(cmd, agent))
+            return true;
+        sleepMs(200);
+    }
+    return false;
 }
 function tmuxCloseSession(session) {
     if (!tmuxAlive(session))
@@ -223,8 +257,14 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, tasks, parentTaskId 
     const exitPath = path.join(logsDir, `${taskId}.exit`);
     const promptText = buildPrompt(taskId, repo, wtMeta.worktree, userTask, parentTaskId);
     fs.writeFileSync(promptPath, promptText, 'utf-8');
-    const cmd = buildAgentStartCommand(agent, logPath, exitPath);
+    fs.writeFileSync(logPath, '', 'utf-8');
+    const cmd = buildAgentStartCommand(agent, exitPath);
     run(['tmux', 'new-session', '-d', '-s', session, '-c', wtMeta.worktree, 'bash', '-lc', cmd]);
+    run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
+    if (!waitForAgentReady(session, agent, 20)) {
+        tmuxCloseSession(session);
+        fail(`agent process did not become ready in tmux session: ${session}`);
+    }
     tmuxSendText(session, promptText);
     const now = nowIso();
     const task = {
@@ -535,6 +575,7 @@ function cmdSpawn(opts) {
         fail('git is not installed');
     const tasks = loadTasks();
     const agent = pickAgent(opts.agent, tools);
+    validateAgentCommand(agent);
     const taskId = opts.name || nowId();
     ensureUniqueTaskId(taskId, tasks);
     const wtMeta = createWorktree(repo, taskId);
@@ -555,6 +596,7 @@ function cmdSpawnFollowup(opts) {
     if (!tools.git)
         fail('git is not installed');
     const agent = pickAgent(opts.agent, tools);
+    validateAgentCommand(agent);
     const taskId = opts.name || nowId();
     ensureUniqueTaskId(taskId, tasks);
     let wtMeta;

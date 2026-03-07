@@ -94,6 +94,14 @@ function pickAgent(requested: string | undefined, tools: AnyObj): string {
   fail('neither codex nor claude is installed');
 }
 
+function validateAgentCommand(agent: string): void {
+  const cp = run([agent, '--help'], undefined, false);
+  if (cp.code !== 0) {
+    const err = (cp.stderr || cp.stdout || '').trim();
+    fail(`agent command '${agent}' exists but '--help' failed: ${err || 'unknown error'}`);
+  }
+}
+
 function nowId(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -128,6 +136,10 @@ function createWorktree(repo: string, taskId: string): AnyObj {
   return { worktree: wt, branch, base_branch: baseBranch };
 }
 
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   const wt = parent.worktree || '';
   const repo = parent.repo || '';
@@ -145,17 +157,17 @@ function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
 
-function buildAgentStartCommand(agent: string, logPath: string, exitPath: string): string {
+function buildAgentStartCommand(agent: string, exitPath: string): string {
   let base = '';
   if (agent === 'codex') base = 'codex --dangerously-bypass-approvals-and-sandbox';
   else if (agent === 'claude') base = 'claude --dangerously-skip-permissions';
   else fail(`unsupported agent: ${agent}`);
-  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
   return [
     'set -o pipefail;',
-    `${base} 2>&1 | tee -a ${q(logPath)};`,
-    'ec=${PIPESTATUS[0]};',
-    `echo "$ec" > ${q(exitPath)};`,
+    `${base};`,
+    'ec=$?;',
+    `echo "$ec" > ${shellQuote(exitPath)};`,
     'exec bash',
   ].join(' ');
 }
@@ -173,6 +185,30 @@ function tmuxCurrentCommand(session: string): string {
   const cp = run(['tmux', 'display-message', '-p', '-t', session, '#{pane_current_command}'], undefined, false);
   if (cp.code !== 0) return '';
   return cp.stdout.trim().toLowerCase();
+}
+
+function sleepMs(ms: number): void {
+  const sab = new SharedArrayBuffer(4);
+  const arr = new Int32Array(sab);
+  Atomics.wait(arr, 0, 0, ms);
+}
+
+function isAgentPaneCommand(cmd: string, agent: string): boolean {
+  if (!cmd) return false;
+  if (cmd === agent) return true;
+  // Some wrappers may still show node as current command.
+  return cmd === 'node';
+}
+
+function waitForAgentReady(session: string, agent: string, timeoutSec = 20): boolean {
+  const deadline = Date.now() + timeoutSec * 1000;
+  while (Date.now() < deadline) {
+    if (!tmuxAlive(session)) return false;
+    const cmd = tmuxCurrentCommand(session);
+    if (isAgentPaneCommand(cmd, agent)) return true;
+    sleepMs(200);
+  }
+  return false;
 }
 
 function tmuxCloseSession(session: string): boolean {
@@ -237,9 +273,15 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
 
   const promptText = buildPrompt(taskId, repo, wtMeta.worktree, userTask, parentTaskId);
   fs.writeFileSync(promptPath, promptText, 'utf-8');
+  fs.writeFileSync(logPath, '', 'utf-8');
 
-  const cmd = buildAgentStartCommand(agent, logPath, exitPath);
+  const cmd = buildAgentStartCommand(agent, exitPath);
   run(['tmux', 'new-session', '-d', '-s', session, '-c', wtMeta.worktree, 'bash', '-lc', cmd]);
+  run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
+  if (!waitForAgentReady(session, agent, 20)) {
+    tmuxCloseSession(session);
+    fail(`agent process did not become ready in tmux session: ${session}`);
+  }
   tmuxSendText(session, promptText);
 
   const now = nowIso();
@@ -532,6 +574,7 @@ function cmdSpawn(opts: AnyObj): void {
   if (!tools.git) fail('git is not installed');
   const tasks = loadTasks();
   const agent = pickAgent(opts.agent, tools);
+  validateAgentCommand(agent);
   const taskId = opts.name || nowId();
   ensureUniqueTaskId(taskId, tasks);
   const wtMeta = createWorktree(repo, taskId);
@@ -549,6 +592,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   if (!tools.tmux) fail('tmux is not installed');
   if (!tools.git) fail('git is not installed');
   const agent = pickAgent(opts.agent, tools);
+  validateAgentCommand(agent);
   const taskId = opts.name || nowId();
   ensureUniqueTaskId(taskId, tasks);
   let wtMeta: AnyObj;
