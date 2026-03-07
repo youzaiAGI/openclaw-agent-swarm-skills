@@ -262,8 +262,13 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, tasks, parentTaskId 
     run(['tmux', 'new-session', '-d', '-s', session, '-c', wtMeta.worktree, 'bash', '-lc', cmd]);
     run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
     if (!waitForAgentReady(session, agent, 20)) {
-        tmuxCloseSession(session);
-        fail(`agent process did not become ready in tmux session: ${session}`);
+        if (fs.existsSync(exitPath)) {
+            const tail = readLogExcerpt(logPath, 300);
+            tmuxCloseSession(session);
+            fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
+        }
+        // Avoid false negatives from pane command detection; keep session and continue.
+        sleepMs(1000);
     }
     tmuxSendText(session, promptText);
     const now = nowIso();

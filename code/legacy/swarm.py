@@ -307,8 +307,12 @@ def spawn_in_tmux(
     run(['tmux', 'new-session', '-d', '-s', session, '-c', worktree_meta['worktree'], 'bash', '-lc', cmd])
     run(['tmux', 'pipe-pane', '-o', '-t', session, f"cat >> {shlex.quote(str(log_path))}"], check=False)
     if not wait_for_agent_ready(session, agent, 20):
-        tmux_close_session(session)
-        fail(f'agent process did not become ready in tmux session: {session}')
+        if exit_path.exists():
+            tail = read_log_excerpt(log_path, 300)
+            tmux_close_session(session)
+            fail(f'agent failed before ready in tmux session: {session}; {tail}')
+        # Avoid false negatives from pane command detection; keep session and continue.
+        time.sleep(1)
     tmux_send_text(session, prompt_text)
 
     now = dt.datetime.now().isoformat()
