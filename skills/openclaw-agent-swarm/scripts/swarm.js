@@ -161,6 +161,10 @@ function buildAgentStartCommand(agent, exitPath) {
 }
 function tmuxSendText(session, text) {
     run(['tmux', 'send-keys', '-t', session, text, 'Enter']);
+    run(['tmux', 'send-keys', '-t', session, 'Enter']);
+}
+function tmuxPrimeSession(session) {
+    run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
 function tmuxAlive(session) {
     if (!session)
@@ -270,6 +274,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, tasks, parentTaskId 
         // Avoid false negatives from pane command detection; keep session and continue.
         sleepMs(1000);
     }
+    tmuxPrimeSession(session);
     tmuxSendText(session, promptText);
     const now = nowIso();
     const task = {

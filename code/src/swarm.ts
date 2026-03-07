@@ -174,6 +174,11 @@ function buildAgentStartCommand(agent: string, exitPath: string): string {
 
 function tmuxSendText(session: string, text: string): void {
   run(['tmux', 'send-keys', '-t', session, text, 'Enter']);
+  run(['tmux', 'send-keys', '-t', session, 'Enter']);
+}
+
+function tmuxPrimeSession(session: string): void {
+  run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
 
 function tmuxAlive(session?: string): boolean {
@@ -287,6 +292,7 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
     // Avoid false negatives from pane command detection; keep session and continue.
     sleepMs(1000);
   }
+  tmuxPrimeSession(session);
   tmuxSendText(session, promptText);
 
   const now = nowIso();

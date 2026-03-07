@@ -194,6 +194,11 @@ def build_agent_start_command(agent: str, exit_path: pathlib.Path) -> str:
 
 def tmux_send_text(session: str, text: str) -> None:
     run(['tmux', 'send-keys', '-t', session, text, 'Enter'])
+    run(['tmux', 'send-keys', '-t', session, 'Enter'])
+
+
+def tmux_prime_session(session: str) -> None:
+    run(['tmux', 'send-keys', '-t', session, 'Enter'])
 
 
 def tmux_alive(session: Optional[str]) -> bool:
@@ -313,6 +318,7 @@ def spawn_in_tmux(
             fail(f'agent failed before ready in tmux session: {session}; {tail}')
         # Avoid false negatives from pane command detection; keep session and continue.
         time.sleep(1)
+    tmux_prime_session(session)
     tmux_send_text(session, prompt_text)
 
     now = dt.datetime.now().isoformat()
