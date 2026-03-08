@@ -145,6 +145,53 @@ function saveTask(task) {
         fs.renameSync(tmp, p);
     });
 }
+function repoLockPath(repo) {
+    const real = path.resolve(repo);
+    const key = Buffer.from(real).toString('base64').replace(/[^A-Za-z0-9]/g, '_');
+    return path.join(GLOBAL_STATE_DIR, `repo-${key}.lock`);
+}
+function withRepoLock(repo, fn) {
+    ensureGlobalStateDir();
+    const lockDir = repoLockPath(repo);
+    const timeoutMs = 60_000;
+    const staleMs = 300_000;
+    const start = Date.now();
+    while (true) {
+        try {
+            fs.mkdirSync(lockDir);
+            break;
+        }
+        catch (error) {
+            if (error?.code !== 'EEXIST')
+                throw error;
+            try {
+                const st = fs.statSync(lockDir);
+                const ageMs = Date.now() - st.mtimeMs;
+                if (ageMs > staleMs) {
+                    fs.rmSync(lockDir, { recursive: true, force: true });
+                    continue;
+                }
+            }
+            catch {
+                // Lock changed while checking; retry.
+            }
+            if (Date.now() - start > timeoutMs)
+                fail(`timeout acquiring repo lock: ${lockDir}`);
+            sleepMs(100);
+        }
+    }
+    try {
+        return fn();
+    }
+    finally {
+        try {
+            fs.rmSync(lockDir, { recursive: true, force: true });
+        }
+        catch {
+            // Ignore unlock failure; stale lock reaper handles leftovers.
+        }
+    }
+}
 function isGitRepo(repo) {
     if (!fs.existsSync(repo) || !fs.statSync(repo).isDirectory())
         return false;
@@ -199,14 +246,16 @@ function currentBranch(repo) {
 }
 function createWorktree(repo, taskId) {
     ensureGlobalStateDir();
-    const repoKey = path.basename(repo);
-    const base = path.join(GLOBAL_WORKTREE_ROOT, repoKey);
-    fs.mkdirSync(base, { recursive: true });
-    const wt = path.join(base, taskId);
-    const branch = `swarm/${taskId}`;
-    const baseBranch = currentBranch(repo);
-    run(['git', 'worktree', 'add', '-b', branch, wt, baseBranch], repo);
-    return { worktree: wt, branch, base_branch: baseBranch };
+    return withRepoLock(repo, () => {
+        const repoKey = path.basename(repo);
+        const base = path.join(GLOBAL_WORKTREE_ROOT, repoKey);
+        fs.mkdirSync(base, { recursive: true });
+        const wt = path.join(base, taskId);
+        const branch = `swarm/${taskId}`;
+        const baseBranch = currentBranch(repo);
+        run(['git', 'worktree', 'add', '-b', branch, wt, baseBranch], repo);
+        return { worktree: wt, branch, base_branch: baseBranch };
+    });
 }
 function shellQuote(s) {
     return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -250,6 +299,7 @@ function buildAgentStartCommand(agent, exitPath) {
 }
 function tmuxSendText(session, text) {
     run(['tmux', 'send-keys', '-t', session, text, 'Enter']);
+    sleepMs(1000);
     run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
 function tmuxSendEnter(session) {
@@ -280,7 +330,9 @@ function tmuxHandleStartupPrompts(session, timeoutSec = 8) {
             && normalized.includes('no, exit')
             && normalized.includes('yes, i accept');
         if (hasBypassPrompt && !handledBypass) {
-            run(['tmux', 'send-keys', '-t', session, '2', 'Enter']);
+            run(['tmux', 'send-keys', '-t', session, 'Down']);
+            sleepMs(1000);
+            run(['tmux', 'send-keys', '-t', session, 'Enter']);
             handledBypass = true;
             sleepMs(300);
             continue;
@@ -362,10 +414,39 @@ function waitForAgentReady(session, agent, timeoutSec = 20) {
     }
     return false;
 }
-function tmuxCloseSession(session) {
+function tmuxCloseSession(session, opts = {}) {
     if (!tmuxAlive(session))
         return true;
-    run(['tmux', 'kill-session', '-t', session], undefined, false);
+    const modeRaw = String(opts.close_mode || 'graceful_then_kill').toLowerCase();
+    const mode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
+    const exitFile = String(opts.exit_file || '');
+    if (mode === 'graceful_then_kill') {
+        // 1) Send '/exit' only once.
+        run(['tmux', 'send-keys', '-t', session, '/exit'], undefined, false);
+        sleepMs(1000);
+        // 2) Send Enter up to 3 times while pane command is not an interactive shell.
+        for (let i = 0; i < 3; i += 1) {
+            if (!tmuxAlive(session))
+                break;
+            const paneCmd = tmuxCurrentCommand(session);
+            if (paneCmd === 'bash' || paneCmd === 'zsh')
+                break;
+            run(['tmux', 'send-keys', '-t', session, 'Enter'], undefined, false);
+            sleepMs(1000);
+        }
+        // 3) Poll exit file for up to 30s before forced kill.
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+            if (exitFile && fs.existsSync(exitFile))
+                break;
+            if (!tmuxAlive(session))
+                break;
+            sleepMs(200);
+        }
+    }
+    // 4) Always kill session as final cleanup.
+    if (tmuxAlive(session))
+        run(['tmux', 'kill-session', '-t', session], undefined, false);
     return !tmuxAlive(session);
 }
 function readLogExcerpt(logPath, maxChars = 1200) {
@@ -665,7 +746,7 @@ function updateStatus(task, opts) {
         if (shouldAutoClose) {
             // Reclaim stale interactive sessions aggressively once idle threshold is reached.
             next = 'auto_closing';
-            if (tmuxCloseSession(session)) {
+            if (tmuxCloseSession(session, { ...opts, exit_file: exitFile })) {
                 if (exitFile && fs.existsSync(exitFile)) {
                     const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
                     const code = Number.parseInt(codeText, 10);
@@ -884,15 +965,6 @@ function cmdAttach(opts) {
     saveTask(task);
     printJson({ ok: true, id: opts.id, sent: true, session });
 }
-function waitSessionGone(session, timeoutMs = 3000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        if (!tmuxAlive(session))
-            return true;
-        sleepMs(100);
-    }
-    return !tmuxAlive(session);
-}
 function cmdCancel(opts) {
     const tasks = loadTasks();
     const task = tasks.find((t) => t.id === opts.id);
@@ -907,14 +979,13 @@ function cmdCancel(opts) {
         printJson({ ok: true, id: opts.id, cancelled: false, already_terminal: true, status });
         return;
     }
-    let killed = false;
-    if (tmuxAlive(session)) {
-        run(['tmux', 'kill-session', '-t', session], undefined, false);
-        killed = !tmuxAlive(session);
-    }
-    else {
-        killed = true;
-    }
+    const closeOpts = addCloseDefaults(opts);
+    const mode = force ? 'kill_only' : closeOpts.close_mode;
+    const killed = tmuxCloseSession(session, {
+        close_mode: mode,
+        graceful_exit_wait_ms: closeOpts.graceful_exit_wait_ms,
+        exit_file: task.exit_file || '',
+    });
     if (!killed) {
         printJson({
             ok: false,
@@ -925,7 +996,7 @@ function cmdCancel(opts) {
         });
         return;
     }
-    const method = force ? 'force_only' : 'kill_session';
+    const method = force ? 'force_only' : mode;
     task.status = 'stopped';
     task.updated_at = now;
     task.last_activity_at = now;
@@ -939,7 +1010,7 @@ function cmdCancel(opts) {
         force,
         method,
         marker_seen: false,
-        graceful_attempted: false,
+        graceful_attempted: mode === 'graceful_then_kill',
         graceful_exited: false,
         session_killed: killed,
         reason,
@@ -1213,6 +1284,19 @@ function addTimingDefaults(opts) {
         auto_close_idle_sec: idleWith,
     };
 }
+function addCloseDefaults(opts) {
+    const modeRaw = String(opts.closeMode ?? opts.close_mode ?? 'graceful_then_kill').toLowerCase();
+    const closeMode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
+    const gracefulWaitMs = Math.max(0, numOrDefault(opts.gracefulExitWaitMs, 1500));
+    return {
+        ...opts,
+        close_mode: closeMode,
+        graceful_exit_wait_ms: gracefulWaitMs,
+    };
+}
+function addRuntimeDefaults(opts) {
+    return addCloseDefaults(addTimingDefaults(opts));
+}
 function showHelp() {
     process.stdout.write([
         'usage: swarm.ts <command> [options]',
@@ -1235,9 +1319,9 @@ function showCommandHelp(cmd) {
         spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
         'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
         attach: ['usage: swarm.ts attach --id <id> --message <text>'],
-        cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>]'],
-        check: ['usage: swarm.ts check [--changes-only] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N]'],
-        status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N]'],
+        cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>] [--close-mode graceful_then_kill|kill_only] [--graceful-exit-wait-ms N]'],
+        check: ['usage: swarm.ts check [--changes-only] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N] [--close-mode graceful_then_kill|kill_only] [--graceful-exit-wait-ms N]'],
+        status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N] [--close-mode graceful_then_kill|kill_only] [--graceful-exit-wait-ms N]'],
         publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
         'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
         list: ['usage: swarm.ts list'],
@@ -1279,23 +1363,25 @@ function main() {
         if (cmd === 'cancel') {
             if (!optsRaw.id)
                 fail('cancel requires --id');
-            cmdCancel({ id: String(optsRaw.id), force: Boolean(optsRaw.force), reason: optsRaw.reason });
+            const o = addCloseDefaults(optsRaw);
+            const force = optsRaw.force === undefined ? true : Boolean(optsRaw.force);
+            cmdCancel({ ...o, id: String(optsRaw.id), force, reason: optsRaw.reason });
             return;
         }
         if (cmd === 'check') {
-            const o = addTimingDefaults(optsRaw);
+            const o = addRuntimeDefaults(optsRaw);
             cmdCheck({ ...o, changesOnly: Boolean(optsRaw.changesOnly) });
             return;
         }
         if (cmd === 'status') {
-            const o = addTimingDefaults(optsRaw);
+            const o = addRuntimeDefaults(optsRaw);
             cmdStatus({ ...o, id: optsRaw.id, query: optsRaw.query });
             return;
         }
         if (cmd === 'publish') {
             if (!optsRaw.id)
                 fail('publish requires --id');
-            const o = addTimingDefaults(optsRaw);
+            const o = addRuntimeDefaults(optsRaw);
             cmdPublish({
                 ...o,
                 id: String(optsRaw.id),
@@ -1310,7 +1396,7 @@ function main() {
         if (cmd === 'create-pr') {
             if (!optsRaw.id)
                 fail('create-pr requires --id');
-            const o = addTimingDefaults(optsRaw);
+            const o = addRuntimeDefaults(optsRaw);
             createPrTask({
                 ...o,
                 id: String(optsRaw.id),
