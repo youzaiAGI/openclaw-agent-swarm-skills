@@ -97,13 +97,17 @@ sequenceDiagram
 │   ├── legacy/swarm.py          # Python 基线实现（对照）
 │   ├── scripts/parity-check.ts  # Python/TS 行为一致性检查
 │   └── package.json             # 构建工具链
+├── scripts/                     # 仓库级自动化脚本
+│   ├── build-skill.sh           # 构建并同步运行产物
+│   └── regression-swarm-concurrency.sh
 ├── skills/openclaw-agent-swarm/ # 可直接分发的 skill 目录
 │   ├── SKILL.md
 │   ├── scripts/swarm.js
 │   ├── scripts/check-agents.sh
 │   └── references/state-format.md
-└── build-skill.sh               # 编译并覆盖 skills/openclaw-agent-swarm/scripts/swarm.js
 ```
+
+构建流向：`code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
 
 ## 5. 核心能力与设计细节
 
@@ -176,7 +180,7 @@ node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 从源码构建并更新 skill 运行文件：
 
 ```bash
-./build-skill.sh
+./scripts/build-skill.sh
 ```
 
 创建任务：

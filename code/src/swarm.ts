@@ -406,19 +406,20 @@ function textContainsAny(text: string, markers: string[]): boolean {
   return markers.some((m) => t.includes(m));
 }
 
-function buildPrompt(taskId: string, repo: string, worktree: string, userTask: string, parentTaskId = ''): string {
+function buildPrompt(taskId: string, _repo: string, worktree: string, userTask: string, parentTaskId = ''): string {
   const parentLine = parentTaskId ? `Parent Task ID: ${parentTaskId}\n` : '';
   return [
     'You are a coding agent running in a git worktree.',
     '',
     `Task ID: ${taskId}`,
-    `${parentLine}Repo: ${repo}`,
+    `${parentLine}Execution scope: Worktree only`,
     `Worktree: ${worktree}`,
     '',
     'User task:',
     userTask,
     '',
     'Rules:',
+    '0) Operate only inside Worktree; do not create/edit/commit files outside Worktree.',
     '1) Make focused changes for this task only.',
     '2) Commit with clear message when done.',
     '3) Print concise final summary and next steps.',

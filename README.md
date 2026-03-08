@@ -99,13 +99,17 @@ sequenceDiagram
 │   ├── legacy/swarm.py          # Python baseline for parity checks
 │   ├── scripts/parity-check.ts  # Python/TS behavior parity tests
 │   └── package.json             # Build toolchain
+├── scripts/                     # Repo automation scripts
+│   ├── build-skill.sh           # Build TS and sync runtime artifact
+│   └── regression-swarm-concurrency.sh
 ├── skills/openclaw-agent-swarm/ # Ship-ready skill payload
 │   ├── SKILL.md
 │   ├── scripts/swarm.js
 │   ├── scripts/check-agents.sh
 │   └── references/state-format.md
-└── build-skill.sh               # Build TS and sync skills/openclaw-agent-swarm/scripts/swarm.js
 ```
+
+Build flow: `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
 
 ## 5. Core Behavior
 
@@ -178,7 +182,7 @@ node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 Build/update skill runtime artifact from source:
 
 ```bash
-./build-skill.sh
+./scripts/build-skill.sh
 ```
 
 Spawn:
