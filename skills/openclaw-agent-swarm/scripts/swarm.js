@@ -7,10 +7,7 @@ const GLOBAL_STATE_DIR = path.join(os.homedir(), '.openclaw', 'agent-swarm');
 const GLOBAL_WORKTREE_ROOT = path.join(GLOBAL_STATE_DIR, 'worktree');
 const GLOBAL_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
 const GLOBAL_LAST_CHECK_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-last-check.json');
-const ACTIVE_AGENT_COMMANDS = new Set(['codex', 'claude']);
-const DONE_MARKERS = [
-    'final answer', 'final summary', 'completed', 'task completed', '任务完成', '已完成', '完成了', '总结如下',
-];
+const GLOBAL_TASKS_LOCK_DIR = `${GLOBAL_TASKS_PATH}.lock`;
 const WAITING_MARKERS = [
     'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
 ];
@@ -56,6 +53,50 @@ function loadTasks() {
 function saveTasks(tasks) {
     ensureGlobalStateDir();
     saveJson(GLOBAL_TASKS_PATH, tasks);
+}
+function withTasksFileLock(fn) {
+    ensureGlobalStateDir();
+    const lockDir = GLOBAL_TASKS_LOCK_DIR;
+    const timeoutMs = 30_000;
+    const staleMs = 120_000;
+    const start = Date.now();
+    while (true) {
+        try {
+            fs.mkdirSync(lockDir);
+            break;
+        }
+        catch (error) {
+            if (error?.code !== 'EEXIST') {
+                throw error;
+            }
+            try {
+                const st = fs.statSync(lockDir);
+                const ageMs = Date.now() - st.mtimeMs;
+                if (ageMs > staleMs) {
+                    fs.rmSync(lockDir, { recursive: true, force: true });
+                    continue;
+                }
+            }
+            catch {
+                // If lock disappears between checks, simply retry.
+            }
+            if (Date.now() - start > timeoutMs) {
+                fail(`timeout acquiring tasks lock: ${lockDir}`);
+            }
+            sleepMs(100);
+        }
+    }
+    try {
+        return fn();
+    }
+    finally {
+        try {
+            fs.rmSync(lockDir, { recursive: true, force: true });
+        }
+        catch {
+            // Ignore unlock failure; stale lock reaper handles leftovers.
+        }
+    }
 }
 function isGitRepo(repo) {
     if (!fs.existsSync(repo) || !fs.statSync(repo).isDirectory())
@@ -164,8 +205,47 @@ function tmuxSendText(session, text) {
     run(['tmux', 'send-keys', '-t', session, text, 'Enter']);
     run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
-function tmuxPrimeSession(session) {
+function tmuxSendEnter(session) {
     run(['tmux', 'send-keys', '-t', session, 'Enter']);
+}
+function tmuxCapturePane(session, startLines = 120) {
+    const cp = run(['tmux', 'capture-pane', '-p', '-S', `-${startLines}`, '-t', session], undefined, false);
+    if (cp.code !== 0)
+        return '';
+    return cp.stdout || '';
+}
+function tmuxHandleStartupPrompts(session, timeoutSec = 8) {
+    const deadline = Date.now() + timeoutSec * 1000;
+    let handledTrust = false;
+    let handledBypass = false;
+    while (Date.now() < deadline) {
+        if (!tmuxAlive(session))
+            return;
+        const paneText = stripAnsi(tmuxCapturePane(session, 160)).toLowerCase();
+        const normalized = paneText.replace(/\s+/g, ' ');
+        const hasTrustPrompt = normalized.includes('trust this folder')
+            || normalized.includes('workspace trust')
+            || normalized.includes('do you trust the contents of this directory');
+        const hasBypassPrompt = normalized.includes('bypass permissions mode')
+            && normalized.includes('no, exit')
+            && normalized.includes('yes, i accept');
+        if (hasBypassPrompt && !handledBypass) {
+            run(['tmux', 'send-keys', '-t', session, '2', 'Enter']);
+            handledBypass = true;
+            sleepMs(300);
+            continue;
+        }
+        if (hasTrustPrompt && !handledTrust) {
+            tmuxSendEnter(session);
+            handledTrust = true;
+            sleepMs(300);
+            continue;
+        }
+        if ((handledTrust || handledBypass) && !hasTrustPrompt && !hasBypassPrompt) {
+            return;
+        }
+        sleepMs(200);
+    }
 }
 function tmuxEnvPairs() {
     const pairs = [];
@@ -251,6 +331,12 @@ function readLogExcerpt(logPath, maxChars = 1200) {
         return '';
     }
 }
+function stripAnsi(text) {
+    return text
+        .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, '')
+        .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
+        .replace(/\u001B[@-_]/g, '');
+}
 function textContainsAny(text, markers) {
     const t = text.toLowerCase();
     return markers.some((m) => t.includes(m));
@@ -303,7 +389,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, tasks, parentTaskId 
         // Avoid false negatives from pane command detection; keep session and continue.
         sleepMs(1000);
     }
-    tmuxPrimeSession(session);
+    tmuxHandleStartupPrompts(session);
     tmuxSendText(session, promptText);
     const now = nowIso();
     const task = {
@@ -499,21 +585,18 @@ function updateStatus(task, opts) {
     const logPath = task.log || '';
     const now = new Date();
     const excerpt = readLogExcerpt(logPath);
-    task.result_excerpt = excerpt;
+    const cleanExcerpt = stripAnsi(excerpt);
+    task.result_excerpt = cleanExcerpt;
     const prevExcerpt = task._last_excerpt || '';
-    if (excerpt !== prevExcerpt) {
+    if (cleanExcerpt !== prevExcerpt) {
         task.last_activity_at = now.toISOString();
-        task._last_excerpt = excerpt;
+        task._last_excerpt = cleanExcerpt;
     }
     const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
     const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
     const alive = tmuxAlive(session);
-    const paneCmd = alive ? tmuxCurrentCommand(session) : '';
-    const hasDone = textContainsAny(excerpt, DONE_MARKERS);
-    const hasWait = textContainsAny(excerpt, WAITING_MARKERS);
+    const hasWait = textContainsAny(cleanExcerpt, WAITING_MARKERS);
     const idleQuietSec = opts.idle_quiet_sec ?? 180;
-    const autoCloseIdleSec = opts.auto_close_idle_sec ?? 900;
-    const hardTimeoutSec = opts.hard_timeout_sec ?? 7200;
     let next = old;
     if (!alive) {
         if (exitFile && fs.existsSync(exitFile)) {
@@ -527,44 +610,32 @@ function updateStatus(task, opts) {
         }
     }
     else {
-        if (ACTIVE_AGENT_COMMANDS.has(paneCmd)) {
-            if (hasWait)
-                next = 'awaiting_input';
-            else if (hasDone && idleSec >= autoCloseIdleSec) {
-                next = 'auto_closing';
-                if (tmuxCloseSession(session)) {
-                    if (exitFile && fs.existsSync(exitFile)) {
-                        const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
-                        const code = Number.parseInt(codeText, 10);
-                        task.exit_code = Number.isNaN(code) ? 1 : code;
-                        next = String(task.exit_code) === '0' ? 'success' : 'failed';
-                    }
-                    else {
-                        next = 'success';
-                    }
+        if (idleSec >= idleQuietSec) {
+            // Reclaim stale interactive sessions aggressively once idle threshold is reached.
+            next = 'auto_closing';
+            if (tmuxCloseSession(session)) {
+                if (exitFile && fs.existsSync(exitFile)) {
+                    const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
+                    const code = Number.parseInt(codeText, 10);
+                    task.exit_code = Number.isNaN(code) ? 1 : code;
+                    next = String(task.exit_code) === '0' ? 'success' : 'failed';
                 }
                 else {
-                    next = 'needs_human';
+                    next = 'stopped';
                 }
             }
-            else
-                next = 'running';
+            else {
+                next = 'needs_human';
+            }
+        }
+        else if (hasWait) {
+            next = 'awaiting_input';
+        }
+        else if (exitFile && fs.existsSync(exitFile)) {
+            next = 'auto_closing';
         }
         else {
-            if (exitFile && fs.existsSync(exitFile)) {
-                const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
-                const code = Number.parseInt(codeText, 10);
-                task.exit_code = Number.isNaN(code) ? 1 : code;
-                if (idleSec >= idleQuietSec) {
-                    next = tmuxCloseSession(session) ? (String(task.exit_code) === '0' ? 'success' : 'failed') : 'needs_human';
-                }
-                else
-                    next = 'auto_closing';
-            }
-            else if (idleSec >= hardTimeoutSec)
-                next = 'needs_human';
-            else
-                next = 'running';
+            next = 'running';
         }
     }
     task.status = next;
@@ -612,23 +683,19 @@ function cmdSpawn(opts) {
         fail('tmux is not installed');
     if (!tools.git)
         fail('git is not installed');
-    const tasks = loadTasks();
     const agent = pickAgent(opts.agent, tools);
     validateAgentCommand(agent);
-    const taskId = opts.name || nowId();
-    ensureUniqueTaskId(taskId, tasks);
-    const wtMeta = createWorktree(repo, taskId);
-    const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks);
+    let task;
+    withTasksFileLock(() => {
+        const tasks = loadTasks();
+        const taskId = opts.name || nowId();
+        ensureUniqueTaskId(taskId, tasks);
+        const wtMeta = createWorktree(repo, taskId);
+        task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks);
+    });
     printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_PATH });
 }
 function cmdSpawnFollowup(opts) {
-    const tasks = loadTasks();
-    const parent = tasks.find((t) => t.id === opts.from);
-    if (!parent)
-        fail(`task not found: ${opts.from}`);
-    const repo = path.resolve(parent.repo || '');
-    if (!isGitRepo(repo))
-        fail(`parent repo is invalid or not git: ${repo}`);
     const tools = detectTools();
     if (!tools.tmux)
         fail('tmux is not installed');
@@ -636,21 +703,33 @@ function cmdSpawnFollowup(opts) {
         fail('git is not installed');
     const agent = pickAgent(opts.agent, tools);
     validateAgentCommand(agent);
-    const taskId = opts.name || nowId();
-    ensureUniqueTaskId(taskId, tasks);
-    let wtMeta;
-    if (opts.worktreeMode === 'new')
-        wtMeta = createWorktree(repo, taskId);
-    else {
-        const [ok, reason, meta] = prepareReusedWorktree(parent);
-        if (!ok)
-            fail(reason);
-        wtMeta = meta;
-    }
-    const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks, parent.id || '');
-    task.worktree_mode = opts.worktreeMode;
-    saveTasks(tasks);
-    printJson({ ok: true, task, parent_id: parent.id, registry: GLOBAL_TASKS_PATH });
+    let task;
+    let parentId = '';
+    withTasksFileLock(() => {
+        const tasks = loadTasks();
+        const parent = tasks.find((t) => t.id === opts.from);
+        if (!parent)
+            fail(`task not found: ${opts.from}`);
+        const repo = path.resolve(parent.repo || '');
+        if (!isGitRepo(repo))
+            fail(`parent repo is invalid or not git: ${repo}`);
+        const taskId = opts.name || nowId();
+        ensureUniqueTaskId(taskId, tasks);
+        let wtMeta;
+        if (opts.worktreeMode === 'new')
+            wtMeta = createWorktree(repo, taskId);
+        else {
+            const [ok, reason, meta] = prepareReusedWorktree(parent);
+            if (!ok)
+                fail(reason);
+            wtMeta = meta;
+        }
+        parentId = parent.id || '';
+        task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks, parentId);
+        task.worktree_mode = opts.worktreeMode;
+        saveTasks(tasks);
+    });
+    printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_PATH });
 }
 function cmdAttach(opts) {
     const tasks = loadTasks();
