@@ -2,6 +2,7 @@
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -40,6 +41,7 @@ WAITING_MARKERS = [
     '等待输入',
     '请输入',
 ]
+TMUX_ENV_EXCLUDE = {'TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL'}
 
 
 def run(cmd: List[str], cwd: Optional[str] = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -201,6 +203,31 @@ def tmux_prime_session(session: str) -> None:
     run(['tmux', 'send-keys', '-t', session, 'Enter'])
 
 
+def tmux_env_args() -> List[str]:
+    args: List[str] = []
+    for key, value in os.environ.items():
+        if key in TMUX_ENV_EXCLUDE:
+            continue
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key):
+            continue
+        if '\x00' in value:
+            continue
+        args.extend(['-e', f'{key}={value}'])
+    return args
+
+
+def tmux_new_session_with_env(session: str, worktree: str, cmd: str) -> None:
+    base = ['tmux', 'new-session', '-d', '-s', session, '-c', worktree]
+    first = run(base + tmux_env_args() + ['bash', '-lc', cmd], check=False)
+    if first.returncode == 0:
+        return
+    fallback = run(base + ['bash', '-lc', cmd], check=False)
+    if fallback.returncode == 0:
+        return
+    err = (first.stderr or first.stdout or fallback.stderr or fallback.stdout or 'tmux new-session failed').strip()
+    raise RuntimeError(err)
+
+
 def tmux_alive(session: Optional[str]) -> bool:
     if not session:
         return False
@@ -309,7 +336,7 @@ def spawn_in_tmux(
     log_path.write_text('', encoding='utf-8')
 
     cmd = build_agent_start_command(agent, exit_path)
-    run(['tmux', 'new-session', '-d', '-s', session, '-c', worktree_meta['worktree'], 'bash', '-lc', cmd])
+    tmux_new_session_with_env(session, worktree_meta['worktree'], cmd)
     run(['tmux', 'pipe-pane', '-o', '-t', session, f"cat >> {shlex.quote(str(log_path))}"], check=False)
     if not wait_for_agent_ready(session, agent, 20):
         if exit_path.exists():

@@ -20,6 +20,7 @@ const DONE_MARKERS = [
 const WAITING_MARKERS = [
   'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
 ];
+const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL']);
 
 function printJson(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -181,6 +182,33 @@ function tmuxPrimeSession(session: string): void {
   run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
 
+function tmuxEnvPairs(): string[] {
+  const pairs: string[] = [];
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v !== 'string') continue;
+    if (TMUX_ENV_EXCLUDE.has(k)) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (v.includes('\u0000')) continue;
+    pairs.push(`${k}=${v}`);
+  }
+  return pairs;
+}
+
+function tmuxNewSessionWithEnv(session: string, cwd: string, cmd: string): void {
+  const base = ['tmux', 'new-session', '-d', '-s', session, '-c', cwd];
+  const withEnv = [...base];
+  for (const p of tmuxEnvPairs()) withEnv.push('-e', p);
+  withEnv.push('bash', '-lc', cmd);
+
+  const first = run(withEnv, undefined, false);
+  if (first.code === 0) return;
+
+  const fallback = run([...base, 'bash', '-lc', cmd], undefined, false);
+  if (fallback.code === 0) return;
+
+  throw new Error(first.stderr || first.stdout || fallback.stderr || fallback.stdout || 'tmux new-session failed');
+}
+
 function tmuxAlive(session?: string): boolean {
   if (!session) return false;
   return run(['tmux', 'has-session', '-t', session], undefined, false).code === 0;
@@ -281,7 +309,7 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
   fs.writeFileSync(logPath, '', 'utf-8');
 
   const cmd = buildAgentStartCommand(agent, exitPath);
-  run(['tmux', 'new-session', '-d', '-s', session, '-c', wtMeta.worktree, 'bash', '-lc', cmd]);
+  tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
   run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
   if (!waitForAgentReady(session, agent, 20)) {
     if (fs.existsSync(exitPath)) {

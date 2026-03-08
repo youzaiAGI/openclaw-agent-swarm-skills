@@ -14,6 +14,7 @@ const DONE_MARKERS = [
 const WAITING_MARKERS = [
     'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
 ];
+const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL']);
 function printJson(payload) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -166,6 +167,35 @@ function tmuxSendText(session, text) {
 function tmuxPrimeSession(session) {
     run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
+function tmuxEnvPairs() {
+    const pairs = [];
+    for (const [k, v] of Object.entries(process.env)) {
+        if (typeof v !== 'string')
+            continue;
+        if (TMUX_ENV_EXCLUDE.has(k))
+            continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+            continue;
+        if (v.includes('\u0000'))
+            continue;
+        pairs.push(`${k}=${v}`);
+    }
+    return pairs;
+}
+function tmuxNewSessionWithEnv(session, cwd, cmd) {
+    const base = ['tmux', 'new-session', '-d', '-s', session, '-c', cwd];
+    const withEnv = [...base];
+    for (const p of tmuxEnvPairs())
+        withEnv.push('-e', p);
+    withEnv.push('bash', '-lc', cmd);
+    const first = run(withEnv, undefined, false);
+    if (first.code === 0)
+        return;
+    const fallback = run([...base, 'bash', '-lc', cmd], undefined, false);
+    if (fallback.code === 0)
+        return;
+    throw new Error(first.stderr || first.stdout || fallback.stderr || fallback.stdout || 'tmux new-session failed');
+}
 function tmuxAlive(session) {
     if (!session)
         return false;
@@ -263,7 +293,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, tasks, parentTaskId 
     fs.writeFileSync(promptPath, promptText, 'utf-8');
     fs.writeFileSync(logPath, '', 'utf-8');
     const cmd = buildAgentStartCommand(agent, exitPath);
-    run(['tmux', 'new-session', '-d', '-s', session, '-c', wtMeta.worktree, 'bash', '-lc', cmd]);
+    tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
     run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
     if (!waitForAgentReady(session, agent, 20)) {
         if (fs.existsSync(exitPath)) {
