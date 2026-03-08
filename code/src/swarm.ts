@@ -247,8 +247,7 @@ function waitForAgentReady(session: string, agent: string, timeoutSec = 20): boo
 function tmuxCloseSession(session: string): boolean {
   if (!tmuxAlive(session)) return true;
   run(['tmux', 'send-keys', '-t', session, '/exit', 'Enter'], undefined, false);
-  run(['tmux', 'send-keys', '-t', session, 'exit', 'Enter'], undefined, false);
-  run(['tmux', 'send-keys', '-t', session, 'C-d'], undefined, false);
+  run(['tmux', 'send-keys', '-t', session, 'Enter']);
   run(['tmux', 'kill-session', '-t', session], undefined, false);
   return !tmuxAlive(session);
 }
