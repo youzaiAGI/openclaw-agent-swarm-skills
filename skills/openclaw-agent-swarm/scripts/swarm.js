@@ -255,6 +255,9 @@ function tmuxSendText(session, text) {
 function tmuxSendEnter(session) {
     run(['tmux', 'send-keys', '-t', session, 'Enter']);
 }
+function tmuxSendEscape(session) {
+    run(['tmux', 'send-keys', '-t', session, 'Escape']);
+}
 function tmuxCapturePane(session, startLines = 120) {
     const cp = run(['tmux', 'capture-pane', '-p', '-S', `-${startLines}`, '-t', session], undefined, false);
     if (cp.code !== 0)
@@ -362,8 +365,6 @@ function waitForAgentReady(session, agent, timeoutSec = 20) {
 function tmuxCloseSession(session) {
     if (!tmuxAlive(session))
         return true;
-    run(['tmux', 'send-keys', '-t', session, '/exit', 'Enter'], undefined, false);
-    run(['tmux', 'send-keys', '-t', session, 'Enter']);
     run(['tmux', 'kill-session', '-t', session], undefined, false);
     return !tmuxAlive(session);
 }
@@ -883,6 +884,77 @@ function cmdAttach(opts) {
     saveTask(task);
     printJson({ ok: true, id: opts.id, sent: true, session });
 }
+function waitSessionGone(session, timeoutMs = 3000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (!tmuxAlive(session))
+            return true;
+        sleepMs(100);
+    }
+    return !tmuxAlive(session);
+}
+function cmdCancel(opts) {
+    const tasks = loadTasks();
+    const task = tasks.find((t) => t.id === opts.id);
+    if (!task)
+        fail(`task not found: ${opts.id}`);
+    const status = String(task.status || 'unknown');
+    const session = String(task.tmux_session || '');
+    const force = Boolean(opts.force);
+    const reason = String(opts.reason || '').trim();
+    const now = nowIso();
+    if (isTerminalStatus(status)) {
+        printJson({ ok: true, id: opts.id, cancelled: false, already_terminal: true, status });
+        return;
+    }
+    let killed = false;
+    if (tmuxAlive(session)) {
+        run(['tmux', 'kill-session', '-t', session], undefined, false);
+        killed = !tmuxAlive(session);
+    }
+    else {
+        killed = true;
+    }
+    if (!killed) {
+        printJson({
+            ok: false,
+            id: opts.id,
+            error: 'cancel_failed_session_still_alive',
+            requires_confirmation: true,
+            actions: [{ action: 'manual_kill_tmux_session', recommended: true }],
+        });
+        return;
+    }
+    const method = force ? 'force_only' : 'kill_session';
+    task.status = 'stopped';
+    task.updated_at = now;
+    task.last_activity_at = now;
+    task.converged_at = now;
+    task.converged_reason = reason
+        ? `user_cancelled:${method}:${reason}`
+        : `user_cancelled:${method}`;
+    task.cancel = {
+        at: now,
+        by_user: true,
+        force,
+        method,
+        marker_seen: false,
+        graceful_attempted: false,
+        graceful_exited: false,
+        session_killed: killed,
+        reason,
+    };
+    task.dod = evaluateDefaultDod(task);
+    saveTask(task);
+    printJson({
+        ok: true,
+        id: opts.id,
+        cancelled: true,
+        status: task.status,
+        converged_reason: task.converged_reason,
+        cancel: task.cancel,
+    });
+}
 function cmdCheck(opts) {
     const loaded = loadTasks();
     const tasks = loaded.map((t) => updateStatus({ ...t }, opts));
@@ -909,6 +981,7 @@ function cmdCheck(opts) {
                 tmux_session: t.tmux_session,
                 from: prev,
                 to: status,
+                converged_reason: t.converged_reason || '',
                 dod: t.dod || {},
                 result_excerpt: (t.result_excerpt || '').slice(-300),
                 publish_prompt: shouldPrompt ? '任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？' : '',
@@ -1127,11 +1200,17 @@ function numOrDefault(v, d) {
     return Number.isNaN(n) ? d : n;
 }
 function addTimingDefaults(opts) {
+    const idleWithout = numOrDefault(opts.idleWithoutRunningMarkerSec ?? opts.idleQuietSec, 30);
+    const idleWith = numOrDefault(opts.idleWithRunningMarkerSec ?? opts.autoCloseIdleSec, 300);
+    const hardTimeout = numOrDefault(opts.hardTimeoutSec, 7200);
     return {
         ...opts,
-        idle_quiet_sec: numOrDefault(opts.idleQuietSec, 180),
-        auto_close_idle_sec: numOrDefault(opts.autoCloseIdleSec, 900),
-        hard_timeout_sec: numOrDefault(opts.hardTimeoutSec, 7200),
+        idle_without_running_marker_sec: idleWithout,
+        idle_with_running_marker_sec: idleWith,
+        hard_timeout_sec: hardTimeout,
+        // Backward-compatible aliases for external callers reading old field names.
+        idle_quiet_sec: idleWithout,
+        auto_close_idle_sec: idleWith,
     };
 }
 function showHelp() {
@@ -1142,6 +1221,7 @@ function showHelp() {
         '  spawn',
         '  spawn-followup',
         '  attach',
+        '  cancel',
         '  check',
         '  status',
         '  publish',
@@ -1155,8 +1235,9 @@ function showCommandHelp(cmd) {
         spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
         'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
         attach: ['usage: swarm.ts attach --id <id> --message <text>'],
-        check: ['usage: swarm.ts check [--changes-only] [--idle-quiet-sec N] [--auto-close-idle-sec N] [--hard-timeout-sec N]'],
-        status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-quiet-sec N] [--auto-close-idle-sec N] [--hard-timeout-sec N]'],
+        cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>]'],
+        check: ['usage: swarm.ts check [--changes-only] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N]'],
+        status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--hard-timeout-sec N]'],
         publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
         'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
         list: ['usage: swarm.ts list'],
@@ -1193,6 +1274,12 @@ function main() {
             if (!optsRaw.id || !optsRaw.message)
                 fail('attach requires --id and --message');
             cmdAttach({ id: String(optsRaw.id), message: String(optsRaw.message) });
+            return;
+        }
+        if (cmd === 'cancel') {
+            if (!optsRaw.id)
+                fail('cancel requires --id');
+            cmdCancel({ id: String(optsRaw.id), force: Boolean(optsRaw.force), reason: optsRaw.reason });
             return;
         }
         if (cmd === 'check') {

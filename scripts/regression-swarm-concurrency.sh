@@ -208,4 +208,74 @@ if (( write_fail != 0 )); then
   exit 1
 fi
 
+run_attach_regression_case() {
+  local agent="$1"
+  local attach_task_id="${PREFIX}-${agent}-attach"
+  local spawn_task="请先输出 need your input，然后保持会话等待，不要自行退出。"
+  local attach_msg="补充要求：请确认已收到附加指令。"
+
+  node "$SWARM_JS" spawn \
+    --repo "$TMP_REPO" \
+    --agent "$agent" \
+    --name "$attach_task_id" \
+    --task "$spawn_task" >/tmp/"${attach_task_id}".spawn.out 2>/tmp/"${attach_task_id}".spawn.err
+
+  sleep 2
+
+  local attach_json
+  attach_json="$(node "$SWARM_JS" attach --id "$attach_task_id" --message "$attach_msg")"
+  local attach_sent
+  attach_sent="$(ATTACH_JSON="$attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
+  if [[ "$attach_sent" != "true" ]]; then
+    echo "[ERROR] attach expected sent=true for running task: $attach_task_id"
+    echo "[DEBUG] attach response: $attach_json"
+    return 1
+  fi
+
+  local cancel_json
+  cancel_json="$(node "$SWARM_JS" cancel --id "$attach_task_id" --force --reason "regression_cleanup_attach")"
+  local cancel_ok
+  cancel_ok="$(CANCEL_JSON="$cancel_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const ok=Boolean(d.cancelled)&&String(d.status||"")==="stopped"&&String(d.converged_reason||"").startsWith("user_cancelled:");process.stdout.write(String(ok));')"
+  if [[ "$cancel_ok" != "true" ]]; then
+    echo "[ERROR] cancel expected cancelled=true and status=stopped: $attach_task_id"
+    echo "[DEBUG] cancel response: $cancel_json"
+    return 1
+  fi
+
+  local cancel_again_json
+  cancel_again_json="$(node "$SWARM_JS" cancel --id "$attach_task_id" --reason "idempotent_check")"
+  local cancel_idempotent
+  cancel_idempotent="$(CANCEL_JSON="$cancel_again_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");process.stdout.write(String(Boolean(d.already_terminal)));')"
+  if [[ "$cancel_idempotent" != "true" ]]; then
+    echo "[ERROR] cancel expected already_terminal=true on second call: $attach_task_id"
+    echo "[DEBUG] cancel second response: $cancel_again_json"
+    return 1
+  fi
+
+  local attach_after_cancel_json
+  attach_after_cancel_json="$(node "$SWARM_JS" attach --id "$attach_task_id" --message "再次补充")"
+  local requires_confirmation
+  requires_confirmation="$(ATTACH_JSON="$attach_after_cancel_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.requires_confirmation)));')"
+  if [[ "$requires_confirmation" != "true" ]]; then
+    echo "[ERROR] attach expected requires_confirmation=true for non-running task: $attach_task_id"
+    echo "[DEBUG] attach response after cancel: $attach_after_cancel_json"
+    return 1
+  fi
+
+  echo "[OK] attach+cancel regression verified for $agent"
+  return 0
+}
+
+attach_fail=0
+for agent in codex claude; do
+  if ! run_attach_regression_case "$agent"; then
+    attach_fail=1
+  fi
+done
+
+if (( attach_fail != 0 )); then
+  echo "[ERROR] attach/cancel regression failed"
+  exit 1
+fi
+
 echo "[PASS] concurrency regression passed"

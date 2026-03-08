@@ -46,7 +46,7 @@ flowchart LR
     C2 --> W2[git worktree B]
     C3 --> W3[git worktree N]
 
-    S --> R[(~/.agents/agent-swarm/\nagent-swarm-tasks.json)]
+    S --> R[(~/.agents/agent-swarm/\ntasks/*.json)]
     S --> L[(logs / prompts / exit files)]
 
     HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
@@ -114,7 +114,7 @@ sequenceDiagram
 ### 5.1 任务模型
 
 每个任务记录在：
-- `~/.agents/agent-swarm/agent-swarm-tasks.json`
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
 
 关键字段包括：
 - `id`, `agent`, `status`
@@ -208,8 +208,19 @@ node "$SKILL_ROOT/scripts/swarm.js" attach \
 查询状态：
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" status --id 20260305-123456-ab12cd
+node "$SKILL_ROOT/scripts/swarm.js" status \
+  --id 20260305-123456-ab12cd \
+  --idle-without-running-marker-sec 30 \
+  --idle-with-running-marker-sec 300
 node "$SKILL_ROOT/scripts/swarm.js" status --query templates
+```
+
+取消任务：
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" cancel \
+  --id 20260305-123456-ab12cd \
+  --reason "手动停止"
 ```
 
 follow-up（已结束任务）：
@@ -224,6 +235,9 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
 轮询检查：
 
 ```bash
+node "$SKILL_ROOT/scripts/swarm.js" check \
+  --idle-without-running-marker-sec 30 \
+  --idle-with-running-marker-sec 300
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
@@ -260,6 +274,7 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 - “开任务 / 并发开几个任务” -> `spawn`
 - “看进度 / 看状态 / 任务怎么样了” -> `status`
 - “给这个任务补充要求” -> `attach`
+- “取消这个任务” -> `cancel --id`
 - “这个任务继续做下一步” -> `spawn-followup`
 - “检查最近有没有状态变化” -> `check --changes-only`
 - “把这个完成任务推到远程并建 PR/MR” -> `publish --auto-pr`

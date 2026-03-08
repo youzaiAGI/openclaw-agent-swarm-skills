@@ -113,6 +113,35 @@ Task not running:
 }
 ```
 
+## cancel
+
+```json
+{
+  "ok": true,
+  "id": "20260308-120101-ab12cd",
+  "cancelled": true,
+  "status": "stopped",
+  "converged_reason": "user_cancelled:kill_session:manual_stop",
+  "cancel": {
+    "by_user": true,
+    "method": "kill_session",
+    "session_killed": true
+  }
+}
+```
+
+If task is already terminal:
+
+```json
+{
+  "ok": true,
+  "id": "20260308-120101-ab12cd",
+  "cancelled": false,
+  "already_terminal": true,
+  "status": "success"
+}
+```
+
 ## status
 
 ```json
@@ -146,6 +175,7 @@ Task not running:
       "id": "20260308-120101-ab12cd",
       "from": "running",
       "to": "stopped",
+      "converged_reason": "user_cancelled:kill_session:manual_stop",
       "repo": "/path/repo-a",
       "worktree": "/Users/youzai/.agents/agent-swarm/worktree/repo-a/20260308-120101-ab12cd",
       "tmux_session": "swarm-20260308-120101-ab12cd",

@@ -48,7 +48,7 @@ flowchart LR
     C2 --> W2[git worktree B]
     C3 --> W3[git worktree N]
 
-    S --> R[(~/.agents/agent-swarm/\nagent-swarm-tasks.json)]
+    S --> R[(~/.agents/agent-swarm/\ntasks/*.json)]
     S --> L[(logs / prompts / exit files)]
 
     HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
@@ -116,7 +116,7 @@ Build flow: `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-
 ### 5.1 Task Model
 
 Tasks are stored in:
-- `~/.agents/agent-swarm/agent-swarm-tasks.json`
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
 
 Key fields:
 - `id`, `agent`, `status`
@@ -210,8 +210,19 @@ node "$SKILL_ROOT/scripts/swarm.js" attach \
 Status:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" status --id 20260305-123456-ab12cd
+node "$SKILL_ROOT/scripts/swarm.js" status \
+  --id 20260305-123456-ab12cd \
+  --idle-without-running-marker-sec 30 \
+  --idle-with-running-marker-sec 300
 node "$SKILL_ROOT/scripts/swarm.js" status --query templates
+```
+
+Cancel:
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" cancel \
+  --id 20260305-123456-ab12cd \
+  --reason "manual stop"
 ```
 
 Follow-up:
@@ -226,6 +237,9 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
 Heartbeat check:
 
 ```bash
+node "$SKILL_ROOT/scripts/swarm.js" check \
+  --idle-without-running-marker-sec 30 \
+  --idle-with-running-marker-sec 300
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
@@ -262,6 +276,7 @@ Suggested intent mapping:
 - "Create tasks in parallel" -> `spawn`
 - "Check progress/status" -> `status`
 - "Add new instruction to this task" -> `attach`
+- "Cancel this task" -> `cancel --id`
 - "Continue this finished task" -> `spawn-followup`
 - "Check changes only" -> `check --changes-only`
 - "Push this finished task and open PR/MR" -> `publish --auto-pr`

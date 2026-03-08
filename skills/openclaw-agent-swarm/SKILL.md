@@ -80,10 +80,23 @@ node "$SKILL_ROOT/scripts/swarm.js" attach \
   --message "<extra instruction>"
 ```
 
+Cancel task:
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" cancel \
+  --id <task_id> \
+  [--force] \
+  [--reason "<cancel reason>"]
+```
+
 Status query:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" status --id <task_id>
+node "$SKILL_ROOT/scripts/swarm.js" status \
+  --id <task_id> \
+  [--idle-without-running-marker-sec N] \
+  [--idle-with-running-marker-sec N] \
+  [--hard-timeout-sec N]
 node "$SKILL_ROOT/scripts/swarm.js" status --query "<id|branch|session|keyword>"
 ```
 
@@ -96,7 +109,10 @@ node "$SKILL_ROOT/scripts/swarm.js" list
 Check tasks (full or changes-only):
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" check
+node "$SKILL_ROOT/scripts/swarm.js" check \
+  [--idle-without-running-marker-sec N] \
+  [--idle-with-running-marker-sec N] \
+  [--hard-timeout-sec N]
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```
 
@@ -145,6 +161,7 @@ Natural language intents map to commands:
 - “开个并发任务” -> `spawn`
 - “看看这个任务进展” -> `status --id` or `status --query`
 - “给这个任务补充要求” -> `attach`
+- “取消这个任务” -> `cancel --id`
 - “如果结束了继续做” -> `spawn-followup --worktree-mode new|reuse` (ask user first)
 - “轮询有没有变化” -> `check --changes-only`
 - “把这个任务推到远程” -> `publish`
