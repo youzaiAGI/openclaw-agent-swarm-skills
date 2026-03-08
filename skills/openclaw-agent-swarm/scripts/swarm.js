@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-const GLOBAL_STATE_DIR = path.join(os.homedir(), '.openclaw', 'agent-swarm');
+const GLOBAL_STATE_DIR = path.join(os.homedir(), '.agents', 'agent-swarm');
 const GLOBAL_WORKTREE_ROOT = path.join(GLOBAL_STATE_DIR, 'worktree');
 const GLOBAL_TASKS_DIR = path.join(GLOBAL_STATE_DIR, 'tasks');
 const GLOBAL_TASKS_HISTORY_DIR = path.join(GLOBAL_TASKS_DIR, 'history');

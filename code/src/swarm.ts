@@ -8,7 +8,7 @@ interface AnyObj {
   [key: string]: any;
 }
 
-const GLOBAL_STATE_DIR = path.join(os.homedir(), '.openclaw', 'agent-swarm');
+const GLOBAL_STATE_DIR = path.join(os.homedir(), '.agents', 'agent-swarm');
 const GLOBAL_WORKTREE_ROOT = path.join(GLOBAL_STATE_DIR, 'worktree');
 const GLOBAL_TASKS_DIR = path.join(GLOBAL_STATE_DIR, 'tasks');
 const GLOBAL_TASKS_HISTORY_DIR = path.join(GLOBAL_TASKS_DIR, 'history');

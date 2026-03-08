@@ -26,16 +26,16 @@ Use this skill to run coding tasks as background tmux sessions with isolated git
 ## Global state
 
 Global task registry and heartbeat state:
-- `~/.openclaw/agent-swarm/agent-swarm-tasks.json`
-- `~/.openclaw/agent-swarm/agent-swarm-last-check.json`
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
+- `~/.agents/agent-swarm/agent-swarm-last-check.json`
 
 Runtime artifacts:
-- `~/.openclaw/agent-swarm/logs/<task_id>.log`
-- `~/.openclaw/agent-swarm/logs/<task_id>.exit`
-- `~/.openclaw/agent-swarm/prompts/<task_id>.txt`
+- `~/.agents/agent-swarm/logs/<task_id>.log`
+- `~/.agents/agent-swarm/logs/<task_id>.exit`
+- `~/.agents/agent-swarm/prompts/<task_id>.txt`
 
 Worktree root:
-- `~/.openclaw/agent-swarm/worktree/<repo-name>/<task_id>`
+- `~/.agents/agent-swarm/worktree/<repo-name>/<task_id>`
 
 ## Commands
 

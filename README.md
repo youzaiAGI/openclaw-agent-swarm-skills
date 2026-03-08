@@ -48,7 +48,7 @@ flowchart LR
     C2 --> W2[git worktree B]
     C3 --> W3[git worktree N]
 
-    S --> R[(~/.openclaw/agent-swarm/\nagent-swarm-tasks.json)]
+    S --> R[(~/.agents/agent-swarm/\nagent-swarm-tasks.json)]
     S --> L[(logs / prompts / exit files)]
 
     HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
@@ -116,7 +116,7 @@ Build flow: `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-
 ### 5.1 Task Model
 
 Tasks are stored in:
-- `~/.openclaw/agent-swarm/agent-swarm-tasks.json`
+- `~/.agents/agent-swarm/agent-swarm-tasks.json`
 
 Key fields:
 - `id`, `agent`, `status`

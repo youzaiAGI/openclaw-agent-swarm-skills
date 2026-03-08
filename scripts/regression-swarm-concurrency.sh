@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SWARM_JS="$ROOT_DIR/skills/openclaw-agent-swarm/scripts/swarm.js"
-STATE_DIR="$HOME/.openclaw/agent-swarm/tasks"
+STATE_DIR="$HOME/.agents/agent-swarm/tasks"
 
 if [[ ! -f "$SWARM_JS" ]]; then
   echo "ERROR: swarm script not found: $SWARM_JS" >&2

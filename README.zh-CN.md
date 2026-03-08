@@ -46,7 +46,7 @@ flowchart LR
     C2 --> W2[git worktree B]
     C3 --> W3[git worktree N]
 
-    S --> R[(~/.openclaw/agent-swarm/\nagent-swarm-tasks.json)]
+    S --> R[(~/.agents/agent-swarm/\nagent-swarm-tasks.json)]
     S --> L[(logs / prompts / exit files)]
 
     HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
@@ -114,7 +114,7 @@ sequenceDiagram
 ### 5.1 任务模型
 
 每个任务记录在：
-- `~/.openclaw/agent-swarm/agent-swarm-tasks.json`
+- `~/.agents/agent-swarm/agent-swarm-tasks.json`
 
 关键字段包括：
 - `id`, `agent`, `status`

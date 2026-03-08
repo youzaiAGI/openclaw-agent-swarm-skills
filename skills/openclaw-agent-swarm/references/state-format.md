@@ -1,12 +1,43 @@
 # State Format
 
-`swarm.py` prints JSON to stdout.
+`swarm.js` prints JSON to stdout.
 
-## Registry
+## Storage Model
 
-Global task summary file (cross-repo):
+Global state root:
 
-`~/.openclaw/agent-swarm/agent-swarm-tasks.json`
+`~/.agents/agent-swarm`
+
+Task storage is directory-based (not a single tasks.json file):
+
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
+- `~/.agents/agent-swarm/tasks/history/<yyyy-mm-dd>/<task_id>.json` (archived terminal tasks)
+- `~/.agents/agent-swarm/agent-swarm-last-check.json`
+- `~/.agents/agent-swarm/logs/<task_id>.log`
+- `~/.agents/agent-swarm/logs/<task_id>.exit`
+- `~/.agents/agent-swarm/prompts/<task_id>.txt`
+
+`registry` fields returned by commands now point to:
+
+`~/.agents/agent-swarm/tasks`
+
+## Common Task Fields
+
+Common persisted fields include:
+
+- `id`, `agent`, `status`
+- `repo`, `worktree`, `branch`, `base_branch`
+- `tmux_session`
+- `task`, `parent_task_id`
+- `created_at`, `updated_at`, `last_activity_at`
+- `log`, `exit_file`, `result_excerpt`
+- `exit_code` (when available)
+- `converged_at`, `converged_reason` (when status transitions to terminal)
+- `dod`, `publish`, `pr`
+
+Terminal statuses:
+
+- `success`, `failed`, `stopped`, `needs_human`
 
 ## spawn
 
@@ -14,41 +45,22 @@ Global task summary file (cross-repo):
 {
   "ok": true,
   "task": {
-    "id": "20260304-204400-ab12cd",
+    "id": "20260308-120101-ab12cd",
     "agent": "codex",
     "status": "running",
     "repo": "/path/repo-a",
-    "worktree": "/path/repo-a-worktrees/20260304-204400-ab12cd",
-    "branch": "swarm/20260304-204400-ab12cd",
-    "tmux_session": "swarm-20260304-204400-ab12cd"
+    "worktree": "/Users/youzai/.agents/agent-swarm/worktree/repo-a/20260308-120101-ab12cd",
+    "branch": "swarm/20260308-120101-ab12cd",
+    "base_branch": "main",
+    "tmux_session": "swarm-20260308-120101-ab12cd"
   },
-  "registry": "/root/.openclaw/workspace/.clawdbot/agent-swarm-tasks.json"
-}
-```
-
-## attach
-
-```json
-{
-  "ok": true,
-  "id": "20260304-204400-ab12cd",
-  "sent": true
-}
-```
-
-When task is not running/alive:
-
-```json
-{
-  "ok": true,
-  "id": "20260304-204400-ab12cd",
-  "sent": false,
-  "requires_confirmation": true,
-  "reason": "task_not_running:success",
-  "actions": [
-    {"action": "spawn_followup_new_worktree", "recommended": true},
-    {"action": "spawn_followup_reuse_worktree", "recommended": false}
-  ]
+  "tools": {
+    "codex": true,
+    "claude": true,
+    "tmux": true,
+    "git": true
+  },
+  "registry": "/Users/youzai/.agents/agent-swarm/tasks"
 }
 ```
 
@@ -57,19 +69,49 @@ When task is not running/alive:
 ```json
 {
   "ok": true,
-  "parent_id": "20260304-204400-ab12cd",
+  "parent_id": "20260308-120101-ab12cd",
   "task": {
-    "id": "20260304-220101-ef56aa",
+    "id": "20260308-121010-ef56aa",
     "status": "running",
     "worktree_mode": "new"
-  }
+  },
+  "registry": "/Users/youzai/.agents/agent-swarm/tasks"
 }
 ```
 
-`worktree_mode=reuse` is guarded and can fail with errors like:
+`worktree_mode=reuse` can fail with guarded reasons such as:
+
 - `reuse_guard_failed:worktree_missing`
 - `reuse_guard_failed:worktree_not_clean`
 - `reuse_guard_failed:parent_session_running`
+
+## attach
+
+Successful send:
+
+```json
+{
+  "ok": true,
+  "id": "20260308-120101-ab12cd",
+  "sent": true
+}
+```
+
+Task not running:
+
+```json
+{
+  "ok": true,
+  "id": "20260308-120101-ab12cd",
+  "sent": false,
+  "requires_confirmation": true,
+  "reason": "task_not_running:stopped",
+  "actions": [
+    { "action": "spawn_followup_new_worktree", "recommended": true },
+    { "action": "spawn_followup_reuse_worktree", "recommended": false }
+  ]
+}
+```
 
 ## status
 
@@ -77,13 +119,60 @@ When task is not running/alive:
 {
   "ok": true,
   "task": {
-    "id": "20260304-204400-ab12cd",
-    "status": "running",
-    "dod": {"pass": false, "reason": "status_not_success:running"},
-    "publish": {"ok": false},
-    "pr": {"state": "manual_required"},
-    "next_step": "attach 补充要求，或等待 heartbeat 下次轮询"
+    "id": "20260308-120101-ab12cd",
+    "status": "stopped",
+    "dod": {
+      "checked": true,
+      "pass": false,
+      "reason": "status_not_success:stopped"
+    },
+    "publish": { "ok": false },
+    "pr": { "state": "manual_required" },
+    "result_excerpt": "...",
+    "next_step": "检查 session 与任务状态，必要时重试"
   }
+}
+```
+
+## check
+
+```json
+{
+  "ok": true,
+  "registry": "/Users/youzai/.agents/agent-swarm/tasks",
+  "changes_only": true,
+  "changes": [
+    {
+      "id": "20260308-120101-ab12cd",
+      "from": "running",
+      "to": "stopped",
+      "repo": "/path/repo-a",
+      "worktree": "/Users/youzai/.agents/agent-swarm/worktree/repo-a/20260308-120101-ab12cd",
+      "tmux_session": "swarm-20260308-120101-ab12cd",
+      "dod": {
+        "checked": true,
+        "pass": false,
+        "commit": false,
+        "clean_worktree": false,
+        "reason": "status_not_success:stopped"
+      },
+      "result_excerpt": "...",
+      "publish_prompt": ""
+    }
+  ],
+  "tasks": []
+}
+```
+
+When `changes` is empty, heartbeat can skip user notification.
+
+## list
+
+```json
+{
+  "ok": true,
+  "registry": "/Users/youzai/.agents/agent-swarm/tasks",
+  "tasks": []
 }
 ```
 
@@ -92,28 +181,14 @@ When task is not running/alive:
 ```json
 {
   "ok": true,
-  "id": "20260304-204400-ab12cd",
+  "id": "20260308-120101-ab12cd",
   "publish": {
     "ok": true,
     "remote": "origin",
-    "remote_branch": "swarm/20260304-204400-ab12cd",
-    "target_branch": "feature/base",
+    "remote_branch": "swarm/20260308-120101-ab12cd",
+    "target_branch": "main",
     "forge": "github"
   },
-  "pr": {
-    "ok": true,
-    "state": "opened",
-    "url": "https://..."
-  }
-}
-```
-
-If forge CLI is unavailable or create failed, `publish` still returns success for push and includes fallback manual URL:
-
-```json
-{
-  "ok": true,
-  "id": "...",
   "pr": {
     "ok": false,
     "state": "manual_required",
@@ -127,7 +202,7 @@ If forge CLI is unavailable or create failed, `publish` still returns success fo
 ```json
 {
   "ok": true,
-  "id": "20260304-204400-ab12cd",
+  "id": "20260308-120101-ab12cd",
   "pr": {
     "ok": false,
     "state": "manual_required",
@@ -136,34 +211,3 @@ If forge CLI is unavailable or create failed, `publish` still returns success fo
   }
 }
 ```
-
-## check
-
-```json
-{
-  "ok": true,
-  "changes_only": true,
-  "changes": [
-    {
-      "id": "...",
-      "from": "running",
-      "to": "success",
-      "repo": "/path/repo-a",
-      "worktree": "~/.openclaw/agent-swarm/worktree/repo-a/...",
-      "tmux_session": "swarm-...",
-      "dod": {
-        "checked": true,
-        "pass": true,
-        "commit": true,
-        "clean_worktree": true,
-        "reason": "ok"
-      },
-      "result_excerpt": "...",
-      "publish_prompt": "任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？"
-    }
-  ],
-  "tasks": []
-}
-```
-
-When `changes` is empty, heartbeat can skip user notification.
