@@ -144,7 +144,26 @@ if [[ "${done:-0}" -ne "${#TASK_IDS[@]}" ]]; then
   exit 1
 fi
 
-# Validate write tasks and count successful samples (file + expected commit).
+# Print final converged reason for each task.
+IDS_CSV="$(IFS=,; echo "${TASK_IDS[*]}")" STATE_DIR="$STATE_DIR" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const ids = (process.env.IDS_CSV || '').split(',').filter(Boolean);
+const stateDir = process.env.STATE_DIR || '';
+for (const id of ids) {
+  const p = path.join(stateDir, `${encodeURIComponent(id)}.json`);
+  if (!fs.existsSync(p)) {
+    console.log(`[RESULT] ${id} status=missing converged_reason=missing_task_json`);
+    continue;
+  }
+  const t = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const status = t.status || 'unknown';
+  const reason = t.converged_reason || 'unknown';
+  console.log(`[RESULT] ${id} status=${status} converged_reason=${reason}`);
+}
+NODE
+
+# Validate every write task created file and commit.
 validate_task_file_and_commit() {
   local task_id="$1"
   local expected_file="$2"
@@ -153,47 +172,39 @@ validate_task_file_and_commit() {
   task_id_encoded="$(node -p "encodeURIComponent(process.argv[1])" "$task_id")"
   local task_json="$STATE_DIR/${task_id_encoded}.json"
   if [[ ! -f "$task_json" ]]; then
-    echo "[WARN] task json missing: $task_id"
-    return 2
+    echo "[ERROR] task json missing: $task_id"
+    return 1
   fi
   local worktree
   worktree="$(node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync('$task_json','utf8'));process.stdout.write(t.worktree||'');")"
   if [[ -z "$worktree" || ! -d "$worktree" ]]; then
-    echo "[WARN] worktree missing for $task_id"
-    return 2
+    echo "[ERROR] worktree missing for $task_id"
+    return 1
   fi
   if [[ ! -f "$worktree/$expected_file" ]]; then
-    echo "[WARN] expected file missing for $task_id: $expected_file"
-    return 3
+    echo "[ERROR] expected file missing for $task_id: $expected_file"
+    return 1
   fi
   local head_msg
   head_msg="$(git -C "$worktree" log -n 1 --pretty=%s || true)"
   if [[ "$head_msg" != "$expected_msg" ]]; then
-    echo "[WARN] unexpected commit message for $task_id: $head_msg"
-    return 4
+    echo "[ERROR] unexpected commit message for $task_id: $head_msg"
+    return 1
   fi
   echo "[OK] $task_id file+commit verified"
   return 0
 }
 
-write_ok_total=0
-write_ok_codex=0
-write_ok_claude=0
+write_fail=0
 for item in "${WRITE_CASES[@]}"; do
   IFS='|' read -r task_id expected_file expected_msg <<< "$item"
-  if validate_task_file_and_commit "$task_id" "$expected_file" "$expected_msg"; then
-    write_ok_total=$((write_ok_total + 1))
-    if [[ "$task_id" == *"-codex-"* ]]; then
-      write_ok_codex=$((write_ok_codex + 1))
-    elif [[ "$task_id" == *"-claude-"* ]]; then
-      write_ok_claude=$((write_ok_claude + 1))
-    fi
+  if ! validate_task_file_and_commit "$task_id" "$expected_file" "$expected_msg"; then
+    write_fail=1
   fi
 done
 
-echo "[INFO] write verification samples: total=$write_ok_total codex=$write_ok_codex claude=$write_ok_claude"
-if (( write_ok_codex < 1 || write_ok_claude < 1 )); then
-  echo "[ERROR] insufficient write success samples (need >=1 for each agent)"
+if (( write_fail != 0 )); then
+  echo "[ERROR] write task verification failed (require all write tasks committed)"
   exit 1
 fi
 

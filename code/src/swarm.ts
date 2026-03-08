@@ -665,6 +665,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   const idleWithRunningMarkerSec = opts.idle_with_running_marker_sec ?? 300;
   const shouldAutoClose = (!hasRunningHint && idleSec >= idleWithoutRunningMarkerSec)
     || (hasRunningHint && idleSec >= idleWithRunningMarkerSec);
+  let convergedReason = '';
 
   let next = old;
   if (!alive) {
@@ -673,8 +674,10 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
       const code = Number.parseInt(codeText, 10);
       task.exit_code = Number.isNaN(code) ? 1 : code;
       next = String(task.exit_code) === '0' ? 'success' : 'failed';
+      convergedReason = `exit_file_code:${task.exit_code}`;
     } else if (['running', 'awaiting_input', 'auto_closing'].includes(old)) {
       next = 'stopped';
+      convergedReason = 'tmux_not_alive_no_exit_file';
     }
   } else {
     if (shouldAutoClose) {
@@ -686,11 +689,20 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
           const code = Number.parseInt(codeText, 10);
           task.exit_code = Number.isNaN(code) ? 1 : code;
           next = String(task.exit_code) === '0' ? 'success' : 'failed';
+          convergedReason = hasRunningHint
+            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_exit_code:${task.exit_code}`
+            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_exit_code:${task.exit_code}`;
         } else {
           next = 'stopped';
+          convergedReason = hasRunningHint
+            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_no_exit_file`
+            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_no_exit_file`;
         }
       } else {
         next = 'needs_human';
+        convergedReason = hasRunningHint
+          ? `auto_close_failed_after_idle_with_running_marker_${idleWithRunningMarkerSec}s`
+          : `auto_close_failed_after_idle_no_running_marker_${idleWithoutRunningMarkerSec}s`;
       }
     } else if (hasWait) {
       next = 'awaiting_input';
@@ -703,6 +715,10 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
 
   task.status = next;
   if (next !== old) task.updated_at = now.toISOString();
+  if (next !== old && isTerminalStatus(next)) {
+    task.converged_at = now.toISOString();
+    if (convergedReason) task.converged_reason = convergedReason;
+  }
   task.dod = evaluateDefaultDod(task);
   return task;
 }
