@@ -195,6 +195,33 @@ validate_task_file_and_commit() {
   return 0
 }
 
+wait_task_terminal() {
+  local task_id="$1"
+  local timeout_sec="${2:-300}"
+  local start_ts
+  start_ts="$(date +%s)"
+  while true; do
+    local now_ts
+    now_ts="$(date +%s)"
+    if (( now_ts - start_ts > timeout_sec )); then
+      echo "[ERROR] timeout waiting terminal status for task: $task_id"
+      return 1
+    fi
+    local status
+    status="$(node "$SWARM_JS" check --json | TARGET_TASK_ID="$task_id" node -e '
+const fs=require("fs");
+const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");
+const id=String(process.env.TARGET_TASK_ID||"");
+const t=(d.tasks||[]).find(x=>String(x.id||"")===id);
+process.stdout.write(String((t&&t.status)||"missing"));
+')"
+    if [[ "$status" == "success" || "$status" == "failed" || "$status" == "stopped" || "$status" == "needs_human" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+}
+
 write_fail=0
 for item in "${WRITE_CASES[@]}"; do
   IFS='|' read -r task_id expected_file expected_msg <<< "$item"
@@ -262,7 +289,93 @@ run_attach_regression_case() {
     return 1
   fi
 
-  echo "[OK] attach+cancel regression verified for $agent"
+  # User rejects confirmation: do nothing and ensure no follow-up task is auto-created.
+  local followup_count_before
+  followup_count_before="$(node "$SWARM_JS" list | FOLLOW_PARENT_ID="$attach_task_id" node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");const c=(d.tasks||[]).filter(t=>String(t.parent_task_id||"")===String(process.env.FOLLOW_PARENT_ID||"")).length;process.stdout.write(String(c));')"
+  local followup_count_after_reject
+  followup_count_after_reject="$(node "$SWARM_JS" list | FOLLOW_PARENT_ID="$attach_task_id" node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");const c=(d.tasks||[]).filter(t=>String(t.parent_task_id||"")===String(process.env.FOLLOW_PARENT_ID||"")).length;process.stdout.write(String(c));')"
+  if [[ "$followup_count_after_reject" != "$followup_count_before" ]]; then
+    echo "[ERROR] reject path should not create follow-up task automatically: $attach_task_id"
+    return 1
+  fi
+
+  # User agrees confirmation: create follow-up (new worktree) and verify commit.
+  local followup_task_id="${attach_task_id}-agree"
+  local followup_file="FOLLOWUP_NEW_${agent}.md"
+  local followup_commit="test: ${agent} followup new commit"
+  local followup_json
+  followup_json="$(node "$SWARM_JS" spawn-followup \
+    --from "$attach_task_id" \
+    --task "写任务：在仓库根目录创建 ${followup_file}，写两行文本并提交 commit，提交信息为 \"${followup_commit}\"。" \
+    --worktree-mode new \
+    --agent "$agent" \
+    --name "$followup_task_id")"
+  local followup_ok
+  followup_ok="$(FOLLOWUP_JSON="$followup_json" FOLLOWUP_TASK_ID="$followup_task_id" FOLLOW_PARENT_ID="$attach_task_id" node -e 'const d=JSON.parse(process.env.FOLLOWUP_JSON||"{}");const ok=Boolean(d.ok)&&String(d.parent_id||"")===String(process.env.FOLLOW_PARENT_ID||"")&&String((d.task||{}).id||"")===String(process.env.FOLLOWUP_TASK_ID||"");process.stdout.write(String(ok));')"
+  if [[ "$followup_ok" != "true" ]]; then
+    echo "[ERROR] agree path should create follow-up task: $attach_task_id"
+    echo "[DEBUG] follow-up response: $followup_json"
+    return 1
+  fi
+  if ! wait_task_terminal "$followup_task_id" 300; then
+    return 1
+  fi
+  if ! validate_task_file_and_commit "$followup_task_id" "$followup_file" "$followup_commit"; then
+    return 1
+  fi
+
+  # User agrees confirmation with reuse mode and verify same worktree + commit.
+  local followup_reuse_task_id="${attach_task_id}-agree-reuse"
+  local followup_reuse_file="FOLLOWUP_REUSE_${agent}.md"
+  local followup_reuse_commit="test: ${agent} followup reuse commit"
+  local followup_reuse_json
+  followup_reuse_json="$(node "$SWARM_JS" spawn-followup \
+    --from "$attach_task_id" \
+    --task "写任务：在仓库根目录创建 ${followup_reuse_file}，写两行文本并提交 commit，提交信息为 \"${followup_reuse_commit}\"。" \
+    --worktree-mode reuse \
+    --agent "$agent" \
+    --name "$followup_reuse_task_id")"
+  local followup_reuse_ok
+  followup_reuse_ok="$(FOLLOWUP_JSON="$followup_reuse_json" FOLLOWUP_TASK_ID="$followup_reuse_task_id" FOLLOW_PARENT_ID="$attach_task_id" node -e '
+const d = JSON.parse(process.env.FOLLOWUP_JSON || "{}");
+const t = d.task || {};
+const ok = Boolean(d.ok)
+  && String(d.parent_id || "") === String(process.env.FOLLOW_PARENT_ID || "")
+  && String(t.id || "") === String(process.env.FOLLOWUP_TASK_ID || "")
+  && String(t.worktree_mode || "") === "reuse";
+process.stdout.write(String(ok));
+')"
+  if [[ "$followup_reuse_ok" != "true" ]]; then
+    echo "[ERROR] agree path (reuse) should create follow-up task: $attach_task_id"
+    echo "[DEBUG] follow-up reuse response: $followup_reuse_json"
+    return 1
+  fi
+
+  local same_worktree
+  same_worktree="$(node "$SWARM_JS" list | FOLLOWUP_JSON="$followup_reuse_json" PARENT_TASK_ID="$attach_task_id" node -e '
+const fs = require("fs");
+const followup = JSON.parse(process.env.FOLLOWUP_JSON || "{}");
+const parentId = String(process.env.PARENT_TASK_ID || "");
+const list = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
+const parent = (list.tasks || []).find((t) => String(t.id || "") === String(parentId));
+const childWt = String((followup.task || {}).worktree || "");
+const parentWt = String((parent || {}).worktree || "");
+process.stdout.write(String(Boolean(childWt && parentWt && childWt === parentWt)));
+')"
+  if [[ "$same_worktree" != "true" ]]; then
+    echo "[ERROR] reuse mode should reuse parent worktree: $attach_task_id"
+    echo "[DEBUG] follow-up reuse response: $followup_reuse_json"
+    return 1
+  fi
+
+  if ! wait_task_terminal "$followup_reuse_task_id" 300; then
+    return 1
+  fi
+  if ! validate_task_file_and_commit "$followup_reuse_task_id" "$followup_reuse_file" "$followup_reuse_commit"; then
+    return 1
+  fi
+
+  echo "[OK] attach+cancel+confirm(new+reuse) regression verified for $agent"
   return 0
 }
 
