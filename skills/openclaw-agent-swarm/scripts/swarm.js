@@ -12,6 +12,9 @@ const LEGACY_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
 const WAITING_MARKERS = [
     'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
 ];
+const RUNNING_MARKERS = [
+    'esc to interrupt',
+];
 const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL']);
 function printJson(payload) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -633,8 +636,14 @@ function updateStatus(task, opts) {
     const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
     const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
     const alive = tmuxAlive(session);
-    const hasWait = textContainsAny(cleanExcerpt, WAITING_MARKERS);
-    const idleQuietSec = opts.idle_quiet_sec ?? 180;
+    const paneExcerpt = alive ? stripAnsi(tmuxCapturePane(session, 160)) : '';
+    const mergedExcerpt = [cleanExcerpt, paneExcerpt].filter(Boolean).join('\n');
+    const hasWait = textContainsAny(mergedExcerpt, WAITING_MARKERS);
+    const hasRunningHint = textContainsAny(mergedExcerpt, RUNNING_MARKERS);
+    const idleWithoutRunningMarkerSec = opts.idle_without_running_marker_sec ?? 30;
+    const idleWithRunningMarkerSec = opts.idle_with_running_marker_sec ?? 300;
+    const shouldAutoClose = (!hasRunningHint && idleSec >= idleWithoutRunningMarkerSec)
+        || (hasRunningHint && idleSec >= idleWithRunningMarkerSec);
     let next = old;
     if (!alive) {
         if (exitFile && fs.existsSync(exitFile)) {
@@ -648,7 +657,7 @@ function updateStatus(task, opts) {
         }
     }
     else {
-        if (idleSec >= idleQuietSec) {
+        if (shouldAutoClose) {
             // Reclaim stale interactive sessions aggressively once idle threshold is reached.
             next = 'auto_closing';
             if (tmuxCloseSession(session)) {
