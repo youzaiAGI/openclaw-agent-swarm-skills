@@ -10,9 +10,10 @@ interface AnyObj {
 
 const GLOBAL_STATE_DIR = path.join(os.homedir(), '.openclaw', 'agent-swarm');
 const GLOBAL_WORKTREE_ROOT = path.join(GLOBAL_STATE_DIR, 'worktree');
-const GLOBAL_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
+const GLOBAL_TASKS_DIR = path.join(GLOBAL_STATE_DIR, 'tasks');
+const GLOBAL_TASKS_HISTORY_DIR = path.join(GLOBAL_TASKS_DIR, 'history');
 const GLOBAL_LAST_CHECK_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-last-check.json');
-const GLOBAL_TASKS_LOCK_DIR = `${GLOBAL_TASKS_PATH}.lock`;
+const LEGACY_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
 
 const WAITING_MARKERS = [
   'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
@@ -42,6 +43,11 @@ function run(cmd: string[], cwd?: string, check = true): { code: number; stdout:
 function ensureGlobalStateDir(): void {
   fs.mkdirSync(GLOBAL_STATE_DIR, { recursive: true });
   fs.mkdirSync(GLOBAL_WORKTREE_ROOT, { recursive: true });
+  fs.mkdirSync(GLOBAL_TASKS_DIR, { recursive: true });
+  fs.mkdirSync(GLOBAL_TASKS_HISTORY_DIR, { recursive: true });
+  if (fs.existsSync(LEGACY_TASKS_PATH)) {
+    fs.rmSync(LEGACY_TASKS_PATH, { force: true });
+  }
 }
 
 function loadJson<T>(p: string, fallback: T): T {
@@ -57,19 +63,21 @@ function saveJson(p: string, data: unknown): void {
   fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-function loadTasks(): AnyObj[] {
-  ensureGlobalStateDir();
-  return loadJson<AnyObj[]>(GLOBAL_TASKS_PATH, []);
+function taskFileName(taskId: string): string {
+  return `${encodeURIComponent(taskId)}.json`;
 }
 
-function saveTasks(tasks: AnyObj[]): void {
-  ensureGlobalStateDir();
-  saveJson(GLOBAL_TASKS_PATH, tasks);
+function taskFilePath(taskId: string): string {
+  return path.join(GLOBAL_TASKS_DIR, taskFileName(taskId));
 }
 
-function withTasksFileLock<T>(fn: () => T): T {
+function taskLockPath(taskId: string): string {
+  return path.join(GLOBAL_TASKS_DIR, `${taskFileName(taskId)}.lock`);
+}
+
+function withTaskFileLock<T>(taskId: string, fn: () => T): T {
   ensureGlobalStateDir();
-  const lockDir = GLOBAL_TASKS_LOCK_DIR;
+  const lockDir = taskLockPath(taskId);
   const timeoutMs = 30_000;
   const staleMs = 120_000;
   const start = Date.now();
@@ -95,7 +103,7 @@ function withTasksFileLock<T>(fn: () => T): T {
       }
 
       if (Date.now() - start > timeoutMs) {
-        fail(`timeout acquiring tasks lock: ${lockDir}`);
+        fail(`timeout acquiring task lock: ${lockDir}`);
       }
       sleepMs(100);
     }
@@ -110,6 +118,40 @@ function withTasksFileLock<T>(fn: () => T): T {
       // Ignore unlock failure; stale lock reaper handles leftovers.
     }
   }
+}
+
+function loadTaskById(taskId: string): AnyObj | null {
+  ensureGlobalStateDir();
+  const p = taskFilePath(taskId);
+  if (!fs.existsSync(p)) return null;
+  return loadJson<AnyObj | null>(p, null);
+}
+
+function loadTasks(): AnyObj[] {
+  ensureGlobalStateDir();
+  const out: AnyObj[] = [];
+  const entries = fs.readdirSync(GLOBAL_TASKS_DIR, { withFileTypes: true });
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    if (!ent.name.endsWith('.json')) continue;
+    const p = path.join(GLOBAL_TASKS_DIR, ent.name);
+    const item = loadJson<AnyObj | null>(p, null);
+    if (!item || typeof item !== 'object') continue;
+    if (!item.id) item.id = decodeURIComponent(ent.name.slice(0, -5));
+    out.push(item);
+  }
+  return out;
+}
+
+function saveTask(task: AnyObj): void {
+  ensureGlobalStateDir();
+  if (!task?.id) fail('task id missing while saving task');
+  withTaskFileLock(task.id, () => {
+    const p = taskFilePath(task.id);
+    const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(task, null, 2), 'utf-8');
+    fs.renameSync(tmp, p);
+  });
 }
 
 function isGitRepo(repo: string): boolean {
@@ -361,10 +403,6 @@ function textContainsAny(text: string, markers: string[]): boolean {
   return markers.some((m) => t.includes(m));
 }
 
-function ensureUniqueTaskId(taskId: string, tasks: AnyObj[]): void {
-  if (tasks.some((t) => t.id === taskId)) fail(`task id already exists: ${taskId}`);
-}
-
 function buildPrompt(taskId: string, repo: string, worktree: string, userTask: string, parentTaskId = ''): string {
   const parentLine = parentTaskId ? `Parent Task ID: ${parentTaskId}\n` : '';
   return [
@@ -385,7 +423,7 @@ function buildPrompt(taskId: string, repo: string, worktree: string, userTask: s
   ].join('\n');
 }
 
-function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string, userTask: string, tasks: AnyObj[], parentTaskId = ''): AnyObj {
+function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string, userTask: string, parentTaskId = ''): AnyObj {
   ensureGlobalStateDir();
   const logsDir = path.join(GLOBAL_STATE_DIR, 'logs');
   const promptsDir = path.join(GLOBAL_STATE_DIR, 'prompts');
@@ -434,8 +472,6 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
     log: logPath,
     exit_file: exitPath,
   };
-  tasks.push(task);
-  saveTasks(tasks);
   return task;
 }
 
@@ -662,6 +698,28 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   return task;
 }
 
+function isTerminalStatus(status: string): boolean {
+  return ['success', 'failed', 'stopped', 'needs_human'].includes(status);
+}
+
+function archiveExpiredTasks(tasks: AnyObj[], now: Date, maxAgeSec = 86400): void {
+  ensureGlobalStateDir();
+  for (const task of tasks) {
+    const status = String(task.status || '');
+    if (!isTerminalStatus(status)) continue;
+    const updated = parseTs(task.updated_at || task.last_activity_at || task.created_at);
+    const ageSec = Math.floor((now.getTime() - updated.getTime()) / 1000);
+    if (ageSec < maxAgeSec) continue;
+    const src = taskFilePath(String(task.id || ''));
+    if (!task.id || !fs.existsSync(src)) continue;
+    const day = updated.toISOString().slice(0, 10);
+    const dstDir = path.join(GLOBAL_TASKS_HISTORY_DIR, day);
+    fs.mkdirSync(dstDir, { recursive: true });
+    const dst = path.join(dstDir, taskFileName(task.id));
+    fs.renameSync(src, dst);
+  }
+}
+
 function taskSummary(task: AnyObj): AnyObj {
   const status = task.status || 'unknown';
   const publish = task.publish || {};
@@ -697,15 +755,19 @@ function cmdSpawn(opts: AnyObj): void {
   if (!tools.git) fail('git is not installed');
   const agent = pickAgent(opts.agent, tools);
   validateAgentCommand(agent);
-  let task!: AnyObj;
-  withTasksFileLock(() => {
-    const tasks = loadTasks();
-    const taskId = opts.name || nowId();
-    ensureUniqueTaskId(taskId, tasks);
-    const wtMeta = createWorktree(repo, taskId);
-    task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks);
-  });
-  printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_PATH });
+  const tasks = loadTasks();
+  const existing = new Set(tasks.map((t) => String(t.id || '')));
+  let taskId = String(opts.name || '').trim();
+  if (taskId) {
+    if (existing.has(taskId) || fs.existsSync(taskFilePath(taskId))) fail(`task id already exists: ${taskId}`);
+  } else {
+    do taskId = nowId();
+    while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
+  }
+  const wtMeta = createWorktree(repo, taskId);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task);
+  saveTask(task);
+  printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
 }
 
 function cmdSpawnFollowup(opts: AnyObj): void {
@@ -714,29 +776,31 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   if (!tools.git) fail('git is not installed');
   const agent = pickAgent(opts.agent, tools);
   validateAgentCommand(agent);
-  let task!: AnyObj;
-  let parentId = '';
-  withTasksFileLock(() => {
-    const tasks = loadTasks();
-    const parent = tasks.find((t) => t.id === opts.from);
-    if (!parent) fail(`task not found: ${opts.from}`);
-    const repo = path.resolve(parent.repo || '');
-    if (!isGitRepo(repo)) fail(`parent repo is invalid or not git: ${repo}`);
-    const taskId = opts.name || nowId();
-    ensureUniqueTaskId(taskId, tasks);
-    let wtMeta: AnyObj;
-    if (opts.worktreeMode === 'new') wtMeta = createWorktree(repo, taskId);
-    else {
-      const [ok, reason, meta] = prepareReusedWorktree(parent);
-      if (!ok) fail(reason);
-      wtMeta = meta;
-    }
-    parentId = parent.id || '';
-    task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, tasks, parentId);
-    task.worktree_mode = opts.worktreeMode;
-    saveTasks(tasks);
-  });
-  printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_PATH });
+  const tasks = loadTasks();
+  const parent = tasks.find((t) => t.id === opts.from);
+  if (!parent) fail(`task not found: ${opts.from}`);
+  const repo = path.resolve(parent.repo || '');
+  if (!isGitRepo(repo)) fail(`parent repo is invalid or not git: ${repo}`);
+  const existing = new Set(tasks.map((t) => String(t.id || '')));
+  let taskId = String(opts.name || '').trim();
+  if (taskId) {
+    if (existing.has(taskId) || fs.existsSync(taskFilePath(taskId))) fail(`task id already exists: ${taskId}`);
+  } else {
+    do taskId = nowId();
+    while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
+  }
+  let wtMeta: AnyObj;
+  if (opts.worktreeMode === 'new') wtMeta = createWorktree(repo, taskId);
+  else {
+    const [ok, reason, meta] = prepareReusedWorktree(parent);
+    if (!ok) fail(reason);
+    wtMeta = meta;
+  }
+  const parentId = parent.id || '';
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, parentId);
+  task.worktree_mode = opts.worktreeMode;
+  saveTask(task);
+  printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
 }
 
 function cmdAttach(opts: AnyObj): void {
@@ -785,13 +849,18 @@ function cmdAttach(opts: AnyObj): void {
   task.status = 'running';
   task.updated_at = nowIso();
   task.last_activity_at = task.updated_at;
-  saveTasks(tasks);
+  saveTask(task);
   printJson({ ok: true, id: opts.id, sent: true, session });
 }
 
 function cmdCheck(opts: AnyObj): void {
-  const tasks = loadTasks().map((t) => updateStatus({ ...t }, opts));
-  saveTasks(tasks);
+  const loaded = loadTasks();
+  const tasks = loaded.map((t) => updateStatus({ ...t }, opts));
+  for (const task of tasks) {
+    saveTask(task);
+  }
+  const now = new Date();
+  archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
   const last = loadJson<Record<string, string>>(GLOBAL_LAST_CHECK_PATH, {});
   const latest: Record<string, string> = {};
   const changes: AnyObj[] = [];
@@ -817,11 +886,12 @@ function cmdCheck(opts: AnyObj): void {
     }
   }
   saveJson(GLOBAL_LAST_CHECK_PATH, latest);
-  printJson({ ok: true, registry: GLOBAL_TASKS_PATH, changes_only: Boolean(opts.changesOnly), changes, tasks: opts.changesOnly ? [] : tasks });
+  const activeTasks = opts.changesOnly ? [] : loadTasks();
+  printJson({ ok: true, registry: GLOBAL_TASKS_DIR, changes_only: Boolean(opts.changesOnly), changes, tasks: activeTasks });
 }
 
 function cmdList(): void {
-  printJson({ ok: true, registry: GLOBAL_TASKS_PATH, tasks: loadTasks() });
+  printJson({ ok: true, registry: GLOBAL_TASKS_DIR, tasks: loadTasks() });
 }
 
 function cmdStatus(opts: AnyObj): void {
@@ -835,7 +905,7 @@ function cmdStatus(opts: AnyObj): void {
     if (idx < 0) fail(`task not found: ${opts.id}`);
     const refreshed = updateStatus({ ...tasks[idx] }, opts);
     tasks[idx] = refreshed;
-    saveTasks(tasks);
+    saveTask(refreshed);
     printJson({ ok: true, task: taskSummary(refreshed) });
     return;
   }
@@ -855,7 +925,7 @@ function cmdStatus(opts: AnyObj): void {
     const idx = tasks.findIndex((t) => t.id === target.id);
     const refreshed = updateStatus({ ...tasks[idx] }, opts);
     tasks[idx] = refreshed;
-    saveTasks(tasks);
+    saveTask(refreshed);
     printJson({ ok: true, task: taskSummary(refreshed) });
     return;
   }
@@ -890,7 +960,7 @@ function createPrTask(opts: AnyObj, tasksInput?: AnyObj[], alreadyRefreshed = fa
       remote_url: remoteInfo.remote_url,
     };
     task.updated_at = nowIso();
-    saveTasks(tasks);
+    saveTask(task);
     const payload = { ok: false, id: task.id, pr: task.pr };
     if (emitOutput) printJson(payload);
     return payload;
@@ -909,7 +979,7 @@ function createPrTask(opts: AnyObj, tasksInput?: AnyObj[], alreadyRefreshed = fa
       remote_url: remoteInfo.remote_url,
     };
     task.updated_at = nowIso();
-    saveTasks(tasks);
+    saveTask(task);
     const payload = { ok: true, id: task.id, pr: task.pr };
     if (emitOutput) printJson(payload);
     return payload;
@@ -928,7 +998,7 @@ function createPrTask(opts: AnyObj, tasksInput?: AnyObj[], alreadyRefreshed = fa
       target_branch: targetBranch,
       source_branch: sourceBranch,
     };
-    saveTasks(tasks);
+    saveTask(task);
     const payload = { ok: true, id: task.id, pr: task.pr };
     if (emitOutput) printJson(payload);
     return payload;
@@ -945,7 +1015,7 @@ function createPrTask(opts: AnyObj, tasksInput?: AnyObj[], alreadyRefreshed = fa
     target_branch: targetBranch,
     source_branch: sourceBranch,
   };
-  saveTasks(tasks);
+  saveTask(task);
   const payload = { ok: true, id: task.id, pr: task.pr };
   if (emitOutput) printJson(payload);
   return payload;
@@ -979,7 +1049,7 @@ function cmdPublish(opts: AnyObj): void {
   if (!ok) {
     const manualUrl = buildManualPrUrl(remoteInfo, branch, targetBranch);
     if (manualUrl) result.manual_pr_url = manualUrl;
-    saveTasks(tasks);
+    saveTask(task);
     printJson(result);
     return;
   }
@@ -1003,7 +1073,7 @@ function cmdPublish(opts: AnyObj): void {
     result.pr = prRes.pr || (tasks.find((t) => t.id === opts.id) || {}).pr || {};
   }
 
-  saveTasks(tasks);
+  saveTask(task);
   printJson(result);
 }
 
