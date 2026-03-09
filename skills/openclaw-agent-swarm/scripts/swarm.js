@@ -424,16 +424,8 @@ function tmuxCloseSession(session, opts = {}) {
         // 1) Send '/exit' only once.
         run(['tmux', 'send-keys', '-t', session, '/exit'], undefined, false);
         sleepMs(1000);
-        // 2) Send Enter up to 3 times while pane command is not an interactive shell.
-        for (let i = 0; i < 3; i += 1) {
-            if (!tmuxAlive(session))
-                break;
-            const paneCmd = tmuxCurrentCommand(session);
-            if (paneCmd === 'bash' || paneCmd === 'zsh')
-                break;
-            run(['tmux', 'send-keys', '-t', session, 'Enter'], undefined, false);
-            sleepMs(1000);
-        }
+        // 2) Confirm once with Enter. This path intentionally avoids pane command probing.
+        run(['tmux', 'send-keys', '-t', session, 'Enter'], undefined, false);
         // 3) Poll exit file for up to 30s before forced kill.
         const deadline = Date.now() + 30_000;
         while (Date.now() < deadline) {
@@ -509,7 +501,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, userTask, parentTaskId = '') {
     if (!waitForAgentReady(session, agent, 20)) {
         if (fs.existsSync(exitPath)) {
             const tail = readLogExcerpt(logPath, 300);
-            tmuxCloseSession(session);
+            tmuxCloseSession(session, { close_mode: 'kill_only' });
             fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
         }
         // Avoid false negatives from pane command detection; keep session and continue.
