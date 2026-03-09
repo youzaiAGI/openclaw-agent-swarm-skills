@@ -95,8 +95,7 @@ Status query:
 node "$SKILL_ROOT/scripts/swarm.js" status \
   --id <task_id> \
   [--idle-without-running-marker-sec N] \
-  [--idle-with-running-marker-sec N] \
-  [--hard-timeout-sec N]
+  [--idle-with-running-marker-sec N]
 node "$SKILL_ROOT/scripts/swarm.js" status --query "<id|branch|session|keyword>"
 ```
 
@@ -111,8 +110,7 @@ Check tasks (full or changes-only):
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" check \
   [--idle-without-running-marker-sec N] \
-  [--idle-with-running-marker-sec N] \
-  [--hard-timeout-sec N]
+  [--idle-with-running-marker-sec N]
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```
 

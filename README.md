@@ -10,6 +10,10 @@ An OpenClaw skill for orchestrating multiple coding agents in parallel:
 - Continue finished tasks through follow-up flows (new or reused worktree)
 - Let users explicitly choose `codex` or `claude` per task
 
+This repository now ships two skill variants:
+- `openclaw-agent-swarm` (interactive tmux sessions with `attach`)
+- `openclaw-agent-swarm-batch` (non-interactive CLI runs in tmux, no mid-task attach)
+
 ## 0. Terminology
 
 `DoD` means `Definition of Done`: the objective completion criteria a task must satisfy.
@@ -102,14 +106,21 @@ sequenceDiagram
 ├── scripts/                     # Repo automation scripts
 │   ├── build-skill.sh           # Build TS and sync runtime artifact
 │   └── regression-swarm-concurrency.sh
+│   └── regression-swarm-batch-concurrency.sh
 ├── skills/openclaw-agent-swarm/ # Ship-ready skill payload
 │   ├── SKILL.md
 │   ├── scripts/swarm.js
 │   ├── scripts/check-agents.sh
 │   └── references/state-format.md
+├── skills/openclaw-agent-swarm-batch/ # Non-interactive batch skill payload
+│   ├── SKILL.md
+│   ├── scripts/swarm-batch.js
+│   └── scripts/check-agents.sh
 ```
 
-Build flow: `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+Build flow:
+- `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+- `code/src/swarm-batch.ts` -> `code/dist/src/swarm-batch.js` -> `skills/openclaw-agent-swarm-batch/scripts/swarm-batch.js`
 
 ## 5. Core Behavior
 
@@ -257,6 +268,32 @@ Create PR/MR manually:
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" create-pr \
   --id 20260305-123456-ab12cd
+```
+
+## 6.1 Batch Variant (Non-Interactive)
+
+Batch skill root:
+
+```bash
+SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm-batch"
+```
+
+Run commands:
+
+```bash
+node "$SKILL_ROOT/scripts/swarm-batch.js" spawn --repo /path/to/repo --task "Implement feature" --agent codex
+node "$SKILL_ROOT/scripts/swarm-batch.js" check --changes-only
+```
+
+Behavior differences:
+- `attach` is not supported; it returns `requires_confirmation` with follow-up options.
+- Long-running tasks are not auto-cancelled. After 3 hours (default), `check` returns a timeout prompt so OpenClaw can ask whether to cancel.
+
+Batch regression script:
+
+```bash
+./scripts/regression-swarm-batch-concurrency.sh
+./scripts/regression-swarm-batch-concurrency.sh 1200 20
 ```
 
 ## 7. Heartbeat Integration (Required)

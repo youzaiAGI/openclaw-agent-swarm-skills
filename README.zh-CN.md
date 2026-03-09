@@ -8,6 +8,10 @@
 - 对已结束任务支持 follow-up（新建或复用 worktree）
 - 支持用户按任务显式指定 `codex` 或 `claude`
 
+本仓库现在提供两种 skill 形态：
+- `openclaw-agent-swarm`（交互式 tmux，会话中可 attach）
+- `openclaw-agent-swarm-batch`（非交互执行，运行在 tmux，任务中途不支持 attach）
+
 ## 0. 术语说明
 
 `DoD` 是 `Definition of Done`（完成定义），即任务被判定“真正完成”必须满足的客观标准。  
@@ -100,14 +104,21 @@ sequenceDiagram
 ├── scripts/                     # 仓库级自动化脚本
 │   ├── build-skill.sh           # 构建并同步运行产物
 │   └── regression-swarm-concurrency.sh
+│   └── regression-swarm-batch-concurrency.sh
 ├── skills/openclaw-agent-swarm/ # 可直接分发的 skill 目录
 │   ├── SKILL.md
 │   ├── scripts/swarm.js
 │   ├── scripts/check-agents.sh
 │   └── references/state-format.md
+├── skills/openclaw-agent-swarm-batch/ # 非交互 batch skill
+│   ├── SKILL.md
+│   ├── scripts/swarm-batch.js
+│   └── scripts/check-agents.sh
 ```
 
-构建流向：`code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+构建流向：
+- `code/src/swarm.ts` -> `code/dist/src/swarm.js` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+- `code/src/swarm-batch.ts` -> `code/dist/src/swarm-batch.js` -> `skills/openclaw-agent-swarm-batch/scripts/swarm-batch.js`
 
 ## 5. 核心能力与设计细节
 
@@ -255,6 +266,32 @@ node "$SKILL_ROOT/scripts/swarm.js" publish \
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" create-pr \
   --id 20260305-123456-ab12cd
+```
+
+## 6.1 Batch 版本（非交互）
+
+Batch skill 路径：
+
+```bash
+SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm-batch"
+```
+
+常用命令：
+
+```bash
+node "$SKILL_ROOT/scripts/swarm-batch.js" spawn --repo /path/to/repo --task "实现功能" --agent codex
+node "$SKILL_ROOT/scripts/swarm-batch.js" check --changes-only
+```
+
+行为差异：
+- `attach` 不支持中途注入，会返回 `requires_confirmation` 和 follow-up 选项。
+- 长任务默认不会自动 cancel；超过 3 小时后，`check` 会返回超时确认提示，由 OpenClaw 询问用户是否取消。
+
+Batch 回归脚本：
+
+```bash
+./scripts/regression-swarm-batch-concurrency.sh
+./scripts/regression-swarm-batch-concurrency.sh 1200 20
 ```
 
 ## 7. Heartbeat 集成（重要）

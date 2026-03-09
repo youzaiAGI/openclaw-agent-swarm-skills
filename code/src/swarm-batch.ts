@@ -8,12 +8,12 @@ interface AnyObj {
   [key: string]: any;
 }
 
-const GLOBAL_STATE_DIR = path.join(os.homedir(), '.agents', 'agent-swarm');
+const GLOBAL_STATE_DIR = path.join(os.homedir(), '.agents', 'agent-swarm-batch');
 const GLOBAL_WORKTREE_ROOT = path.join(GLOBAL_STATE_DIR, 'worktree');
 const GLOBAL_TASKS_DIR = path.join(GLOBAL_STATE_DIR, 'tasks');
 const GLOBAL_TASKS_HISTORY_DIR = path.join(GLOBAL_TASKS_DIR, 'history');
-const GLOBAL_LAST_CHECK_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-last-check.json');
-const LEGACY_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
+const GLOBAL_LAST_CHECK_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-batch-last-check.json');
+const LEGACY_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-batch-tasks.json');
 
 const WAITING_MARKERS = [
   'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
@@ -292,81 +292,24 @@ function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
 
-function buildAgentStartCommand(agent: string, exitPath: string): string {
-  let base = '';
-  if (agent === 'codex') base = 'codex --dangerously-bypass-approvals-and-sandbox';
-  else if (agent === 'claude') base = 'claude --dangerously-skip-permissions';
-  else fail(`unsupported agent: ${agent}`);
+function buildAgentStartCommand(agent: string, promptPath: string, logPath: string, exitPath: string): string {
+  const promptQ = shellQuote(promptPath);
+  const logQ = shellQuote(logPath);
+  const exitQ = shellQuote(exitPath);
+  const runCmd = agent === 'codex'
+    ? 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"'
+    : agent === 'claude'
+      ? 'claude --dangerously-skip-permissions -p "$prompt"'
+      : '';
+  if (!runCmd) fail(`unsupported agent: ${agent}`);
 
   return [
     'set -o pipefail;',
-    `${base};`,
+    `prompt="$(cat ${promptQ})";`,
+    `${runCmd} >> ${logQ} 2>&1;`,
     'ec=$?;',
-    `echo "$ec" > ${shellQuote(exitPath)};`,
-    'exec bash',
+    `echo "$ec" > ${exitQ};`,
   ].join(' ');
-}
-
-function tmuxSendText(session: string, text: string): void {
-  run(['tmux', 'set-buffer', '--', text]);
-  run(['tmux', 'paste-buffer', '-d', '-t', session]);
-  sleepMs(1000);
-  tmuxSendEnter(session);
-}
-
-function tmuxSendEnter(session: string): void {
-  run(['tmux', 'send-keys', '-t', session, 'Enter']);
-}
-
-function tmuxSendEscape(session: string): void {
-  run(['tmux', 'send-keys', '-t', session, 'Escape']);
-}
-
-function tmuxCapturePane(session: string, startLines = 120): string {
-  const cp = run(['tmux', 'capture-pane', '-p', '-S', `-${startLines}`, '-t', session], undefined, false);
-  if (cp.code !== 0) return '';
-  return cp.stdout || '';
-}
-
-function tmuxHandleStartupPrompts(session: string, timeoutSec = 8): void {
-  const deadline = Date.now() + timeoutSec * 1000;
-  let handledTrust = false;
-  let handledBypass = false;
-
-  while (Date.now() < deadline) {
-    if (!tmuxAlive(session)) return;
-    const paneText = stripAnsi(tmuxCapturePane(session, 160)).toLowerCase();
-    const normalized = paneText.replace(/\s+/g, ' ');
-
-    const hasTrustPrompt = normalized.includes('trust this folder')
-      || normalized.includes('workspace trust')
-      || normalized.includes('do you trust the contents of this directory');
-    const hasBypassPrompt = normalized.includes('bypass permissions mode')
-      && normalized.includes('no, exit')
-      && normalized.includes('yes, i accept');
-
-    if (hasBypassPrompt && !handledBypass) {
-      run(['tmux', 'send-keys', '-t', session, 'Down']);
-      sleepMs(1000);
-      run(['tmux', 'send-keys', '-t', session, 'Enter']);
-      handledBypass = true;
-      sleepMs(300);
-      continue;
-    }
-
-    if (hasTrustPrompt && !handledTrust) {
-      tmuxSendEnter(session);
-      handledTrust = true;
-      sleepMs(300);
-      continue;
-    }
-
-    if ((handledTrust || handledBypass) && !hasTrustPrompt && !hasBypassPrompt) {
-      return;
-    }
-
-    sleepMs(200);
-  }
 }
 
 function tmuxEnvPairs(): string[] {
@@ -401,60 +344,15 @@ function tmuxAlive(session?: string): boolean {
   return run(['tmux', 'has-session', '-t', session], undefined, false).code === 0;
 }
 
-function tmuxCurrentCommand(session: string): string {
-  const cp = run(['tmux', 'display-message', '-p', '-t', session, '#{pane_current_command}'], undefined, false);
-  if (cp.code !== 0) return '';
-  return cp.stdout.trim().toLowerCase();
-}
-
 function sleepMs(ms: number): void {
   const sab = new SharedArrayBuffer(4);
   const arr = new Int32Array(sab);
   Atomics.wait(arr, 0, 0, ms);
 }
 
-function isAgentPaneCommand(cmd: string, agent: string): boolean {
-  if (!cmd) return false;
-  if (cmd === agent) return true;
-  // Some wrappers may still show node as current command.
-  return cmd === 'node';
-}
-
-function waitForAgentReady(session: string, agent: string, timeoutSec = 20): boolean {
-  const deadline = Date.now() + timeoutSec * 1000;
-  while (Date.now() < deadline) {
-    if (!tmuxAlive(session)) return false;
-    const cmd = tmuxCurrentCommand(session);
-    if (isAgentPaneCommand(cmd, agent)) return true;
-    sleepMs(200);
-  }
-  return false;
-}
-
 function tmuxCloseSession(session: string, opts: AnyObj = {}): boolean {
   if (!tmuxAlive(session)) return true;
-  const modeRaw = String(opts.close_mode || 'graceful_then_kill').toLowerCase();
-  const mode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
-  const exitFile = String(opts.exit_file || '');
-
-  if (mode === 'graceful_then_kill') {
-    // 1) Send '/exit' only once.
-    run(['tmux', 'send-keys', '-t', session, '/exit'], undefined, false);
-    sleepMs(1000);
-
-    // 2) Confirm once with Enter. This path intentionally avoids pane command probing.
-    run(['tmux', 'send-keys', '-t', session, 'Enter'], undefined, false);
-
-    // 3) Poll exit file for up to 30s before forced kill.
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      if (exitFile && fs.existsSync(exitFile)) break;
-      if (!tmuxAlive(session)) break;
-      sleepMs(200);
-    }
-  }
-
-  // 4) Always kill session as final cleanup.
+  // Batch mode cancel is always kill-only.
   if (tmuxAlive(session)) run(['tmux', 'kill-session', '-t', session], undefined, false);
   return !tmuxAlive(session);
 }
@@ -474,11 +372,6 @@ function stripAnsi(text: string): string {
     .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, '')
     .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
     .replace(/\u001B[@-_]/g, '');
-}
-
-function textContainsAny(text: string, markers: string[]): boolean {
-  const t = text.toLowerCase();
-  return markers.some((m) => t.includes(m));
 }
 
 function buildPrompt(taskId: string, _repo: string, worktree: string, userTask: string, parentTaskId = ''): string {
@@ -509,7 +402,7 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
   fs.mkdirSync(logsDir, { recursive: true });
   fs.mkdirSync(promptsDir, { recursive: true });
 
-  const session = `swarm-${taskId}`.replace(/\//g, '-');
+  const session = `swarm-batch-${taskId}`.replace(/\//g, '-');
   const promptPath = path.join(promptsDir, `${taskId}.txt`);
   const logPath = path.join(logsDir, `${taskId}.log`);
   const exitPath = path.join(logsDir, `${taskId}.exit`);
@@ -517,21 +410,11 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
   const promptText = buildPrompt(taskId, repo, wtMeta.worktree, userTask, parentTaskId);
   fs.writeFileSync(promptPath, promptText, 'utf-8');
   fs.writeFileSync(logPath, '', 'utf-8');
+  fs.writeFileSync(exitPath, '', 'utf-8');
+  fs.rmSync(exitPath, { force: true });
 
-  const cmd = buildAgentStartCommand(agent, exitPath);
+  const cmd = buildAgentStartCommand(agent, promptPath, logPath, exitPath);
   tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
-  run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
-  if (!waitForAgentReady(session, agent, 20)) {
-    if (fs.existsSync(exitPath)) {
-      const tail = readLogExcerpt(logPath, 300);
-      tmuxCloseSession(session, { close_mode: 'kill_only' });
-      fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
-    }
-    // Avoid false negatives from pane command detection; keep session and continue.
-    sleepMs(1000);
-  }
-  tmuxHandleStartupPrompts(session);
-  tmuxSendText(session, promptText);
 
   const now = nowIso();
   const task: AnyObj = {
@@ -729,18 +612,11 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   }
 
   const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
-  const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
-
   const alive = tmuxAlive(session);
-  const paneExcerpt = alive ? stripAnsi(tmuxCapturePane(session, 160)) : '';
-  const mergedExcerpt = [cleanExcerpt, paneExcerpt].filter(Boolean).join('\n');
-  const hasWait = textContainsAny(mergedExcerpt, WAITING_MARKERS);
-  const hasRunningHint = textContainsAny(mergedExcerpt, RUNNING_MARKERS);
-  const idleWithoutRunningMarkerSec = opts.idle_without_running_marker_sec ?? 30;
-  const idleWithRunningMarkerSec = opts.idle_with_running_marker_sec ?? 300;
-  const shouldAutoClose = (!hasRunningHint && idleSec >= idleWithoutRunningMarkerSec)
-    || (hasRunningHint && idleSec >= idleWithRunningMarkerSec);
+  const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
+  const runningConfirmSec = Math.max(60, Number(opts.idle_without_running_marker_sec ?? 10_800));
   let convergedReason = '';
+  let metadataChanged = false;
 
   let next = old;
   if (!alive) {
@@ -750,46 +626,43 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
       task.exit_code = Number.isNaN(code) ? 1 : code;
       next = String(task.exit_code) === '0' ? 'success' : 'failed';
       convergedReason = `exit_file_code:${task.exit_code}`;
-    } else if (['running', 'awaiting_input', 'auto_closing'].includes(old)) {
-      next = 'stopped';
+      if (task.timeout_confirmation_needed) {
+        task.timeout_confirmation_needed = false;
+        metadataChanged = true;
+      }
+    } else if (old === 'running') {
+      next = 'failed';
       convergedReason = 'tmux_not_alive_no_exit_file';
     }
   } else {
-    if (shouldAutoClose) {
-      // Reclaim stale interactive sessions aggressively once idle threshold is reached.
-      next = 'auto_closing';
-      if (tmuxCloseSession(session, { ...opts, exit_file: exitFile })) {
-        if (exitFile && fs.existsSync(exitFile)) {
-          const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
-          const code = Number.parseInt(codeText, 10);
-          task.exit_code = Number.isNaN(code) ? 1 : code;
-          next = String(task.exit_code) === '0' ? 'success' : 'failed';
-          convergedReason = hasRunningHint
-            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_exit_code:${task.exit_code}`
-            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_exit_code:${task.exit_code}`;
-        } else {
-          next = 'stopped';
-          convergedReason = hasRunningHint
-            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_no_exit_file`
-            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_no_exit_file`;
-        }
-      } else {
-        next = 'needs_human';
-        convergedReason = hasRunningHint
-          ? `auto_close_failed_after_idle_with_running_marker_${idleWithRunningMarkerSec}s`
-          : `auto_close_failed_after_idle_no_running_marker_${idleWithoutRunningMarkerSec}s`;
+    if (exitFile && fs.existsSync(exitFile)) {
+      const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
+      const code = Number.parseInt(codeText, 10);
+      task.exit_code = Number.isNaN(code) ? 1 : code;
+      next = String(task.exit_code) === '0' ? 'success' : 'failed';
+      convergedReason = `exit_file_code_while_session_alive:${task.exit_code}`;
+      tmuxCloseSession(session);
+      if (task.timeout_confirmation_needed) {
+        task.timeout_confirmation_needed = false;
+        metadataChanged = true;
       }
-    } else if (hasWait) {
-      next = 'awaiting_input';
+    } else if (idleSec >= runningConfirmSec) {
+      // In batch mode, long-running tasks should ask for user confirmation rather than auto-cancel.
+      if (!task.timeout_confirmation_needed) {
+        task.timeout_confirmation_needed = true;
+        task.timeout_confirmation_at = now.toISOString();
+        task.timeout_confirmation_sec = runningConfirmSec;
+        metadataChanged = true;
+      }
     } else if (exitFile && fs.existsSync(exitFile)) {
-      next = 'auto_closing';
+      next = 'running';
     } else {
       next = 'running';
     }
   }
 
   task.status = next;
-  if (next !== old) task.updated_at = now.toISOString();
+  if (next !== old || metadataChanged) task.updated_at = now.toISOString();
   if (next !== old && isTerminalStatus(next)) {
     task.converged_at = now.toISOString();
     if (convergedReason) task.converged_reason = convergedReason;
@@ -799,7 +672,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
 }
 
 function isTerminalStatus(status: string): boolean {
-  return ['success', 'failed', 'stopped', 'needs_human'].includes(status);
+  return ['success', 'failed'].includes(status);
 }
 
 function logQuietLongEnough(task: AnyObj, now: Date, minQuietSec: number): boolean {
@@ -847,11 +720,15 @@ function taskSummary(task: AnyObj): AnyObj {
   const publish = task.publish || {};
   const pr = task.pr || {};
   let nextStep = '检查 session 与任务状态，必要时重试';
-  if (['running', 'awaiting_input'].includes(status)) nextStep = 'attach 补充要求，或等待 heartbeat 下次轮询';
+  if (status === 'running') {
+    nextStep = task.timeout_confirmation_needed
+      ? `任务运行超过${task.timeout_confirmation_sec || 10800}s，是否执行 cancel？`
+      : '等待任务自然结束，或执行 cancel';
+  }
   else if (status === 'success') {
     if (publish.ok) nextStep = pr.ok ? 'PR/MR 已创建，继续评审与合并' : '分支已推送，执行 create-pr 或按手工链接创建 PR/MR';
     else nextStep = '任务已完成，是否执行 publish --auto-pr 推送并创建 PR/MR';
-  } else if (['failed', 'needs_human'].includes(status)) nextStep = '查看日志并 attach 修正，或创建 follow-up 任务';
+  } else if (status === 'failed') nextStep = '查看日志后创建 follow-up 任务（new|reuse）';
 
   return {
     id: task.id,
@@ -931,48 +808,17 @@ function cmdAttach(opts: AnyObj): void {
   if (!task) fail(`task not found: ${opts.id}`);
   const msg = String(opts.message || '').trim();
   if (!msg) fail('message is empty');
-  const status = task.status || 'unknown';
-  const runningLike = new Set(['running', 'awaiting_input', 'auto_closing']);
-  if (!runningLike.has(status)) {
-    printJson({
-      ok: true,
-      id: opts.id,
-      sent: false,
-      requires_confirmation: true,
-      reason: `task_not_running:${status}`,
-      actions: [
-        { action: 'spawn_followup_new_worktree', recommended: true },
-        { action: 'spawn_followup_reuse_worktree', recommended: false },
-        { action: 'force_attach_legacy_session', recommended: false },
-      ],
-    });
-    return;
-  }
-  const session = task.tmux_session || '';
-  if (!tmuxAlive(session)) {
-    printJson({
-      ok: true,
-      id: opts.id,
-      sent: false,
-      requires_confirmation: true,
-      reason: 'session_not_alive',
-      actions: [
-        { action: 'spawn_followup_new_worktree', recommended: true },
-        { action: 'spawn_followup_reuse_worktree', recommended: false },
-      ],
-    });
-    return;
-  }
-  try {
-    tmuxSendText(session, msg);
-  } catch (e) {
-    fail(`failed to send message to tmux session ${session}: ${String(e)}`);
-  }
-  task.status = 'running';
-  task.updated_at = nowIso();
-  task.last_activity_at = task.updated_at;
-  saveTask(task);
-  printJson({ ok: true, id: opts.id, sent: true, session });
+  printJson({
+    ok: true,
+    id: opts.id,
+    sent: false,
+    requires_confirmation: true,
+    reason: 'attach_not_supported_in_batch_mode',
+    actions: [
+      { action: 'spawn_followup_new_worktree', recommended: true },
+      { action: 'spawn_followup_reuse_worktree', recommended: false },
+    ],
+  });
 }
 
 function cmdCancel(opts: AnyObj): void {
@@ -982,7 +828,6 @@ function cmdCancel(opts: AnyObj): void {
 
   const status = String(task.status || 'unknown');
   const session = String(task.tmux_session || '');
-  const force = Boolean(opts.force);
   const reason = String(opts.reason || '').trim();
   const now = nowIso();
 
@@ -991,12 +836,7 @@ function cmdCancel(opts: AnyObj): void {
     return;
   }
 
-  const closeOpts = addCloseDefaults(opts);
-  const mode = force ? 'kill_only' : closeOpts.close_mode;
-  const killed = tmuxCloseSession(session, {
-    close_mode: mode,
-    exit_file: task.exit_file || '',
-  });
+  const killed = tmuxCloseSession(session);
 
   if (!killed) {
     printJson({
@@ -1009,9 +849,9 @@ function cmdCancel(opts: AnyObj): void {
     return;
   }
 
-  const method = force ? 'force_only' : mode;
+  const method = 'kill_only';
 
-  task.status = 'stopped';
+  task.status = 'failed';
   task.updated_at = now;
   task.last_activity_at = now;
   task.converged_at = now;
@@ -1021,10 +861,10 @@ function cmdCancel(opts: AnyObj): void {
   task.cancel = {
     at: now,
     by_user: true,
-    force,
+    force: Boolean(opts.force),
     method,
     marker_seen: false,
-    graceful_attempted: mode === 'graceful_then_kill',
+    graceful_attempted: false,
     graceful_exited: false,
     session_killed: killed,
     reason,
@@ -1063,9 +903,13 @@ function cmdCheck(opts: AnyObj): void {
     if (!shouldKeepLastCheckEntry(t, now, Number(opts.archiveAgeSec || 86400))) continue;
     const tid = t.id;
     const status = t.status;
-    latest[tid] = status;
-    const prev = last[tid];
-    if (prev !== status) {
+    const timeoutConfirm = Boolean(t.timeout_confirmation_needed);
+    const statusKey = `${status}|timeout_confirm=${timeoutConfirm ? '1' : '0'}`;
+    latest[tid] = statusKey;
+    const prev = last[tid] || '';
+    const prevStatus = prev.split('|')[0] || '';
+    const prevTimeoutConfirm = prev.includes('timeout_confirm=1');
+    if (prev !== statusKey) {
       const publish = t.publish || {};
       const shouldPrompt = status === 'success' && (t.dod || {}).pass && !publish.ok;
       changes.push({
@@ -1073,11 +917,14 @@ function cmdCheck(opts: AnyObj): void {
         repo: t.repo,
         worktree: t.worktree,
         tmux_session: t.tmux_session,
-        from: prev,
+        from: prevStatus,
         to: status,
         converged_reason: t.converged_reason || '',
         dod: t.dod || {},
         result_excerpt: (t.result_excerpt || '').slice(-300),
+        timeout_prompt: (!prevTimeoutConfirm && timeoutConfirm)
+          ? `任务已运行超过${t.timeout_confirmation_sec || 10800}s，是否取消任务？`
+          : '',
         publish_prompt: shouldPrompt ? '任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？' : '',
       });
     }
@@ -1304,39 +1151,24 @@ function numOrDefault(v: any, d: number): number {
 function addTimingDefaults(opts: AnyObj): AnyObj {
   const idleWithout = numOrDefault(
     opts.idleWithoutRunningMarkerSec ?? opts.idleQuietSec,
-    30,
-  );
-  const idleWith = numOrDefault(
-    opts.idleWithRunningMarkerSec ?? opts.autoCloseIdleSec,
-    300,
+    10_800,
   );
   return {
     ...opts,
     idle_without_running_marker_sec: idleWithout,
-    idle_with_running_marker_sec: idleWith,
     // Backward-compatible aliases for external callers reading old field names.
     idle_quiet_sec: idleWithout,
-    auto_close_idle_sec: idleWith,
-  };
-}
-
-function addCloseDefaults(opts: AnyObj): AnyObj {
-  const modeRaw = String(opts.closeMode ?? opts.close_mode ?? 'graceful_then_kill').toLowerCase();
-  const closeMode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
-  return {
-    ...opts,
-    close_mode: closeMode,
   };
 }
 
 function addRuntimeDefaults(opts: AnyObj): AnyObj {
-  return addCloseDefaults(addTimingDefaults(opts));
+  return addTimingDefaults(opts);
 }
 
 function showHelp(): void {
   process.stdout.write(
     [
-      'usage: swarm.ts <command> [options]',
+      'usage: swarm-batch.ts <command> [options]',
       '',
       'commands:',
       '  spawn',
@@ -1355,17 +1187,17 @@ function showHelp(): void {
 
 function showCommandHelp(cmd: string): void {
   const lines: Record<string, string[]> = {
-    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
-    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
-    attach: ['usage: swarm.ts attach --id <id> --message <text>'],
-    cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>] [--close-mode graceful_then_kill|kill_only]'],
-    check: ['usage: swarm.ts check [--changes-only] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--close-mode graceful_then_kill|kill_only]'],
-    status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--close-mode graceful_then_kill|kill_only]'],
-    publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
-    'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
-    list: ['usage: swarm.ts list'],
+    spawn: ['usage: swarm-batch.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
+    'spawn-followup': ['usage: swarm-batch.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
+    attach: ['usage: swarm-batch.ts attach --id <id> --message <text>'],
+    cancel: ['usage: swarm-batch.ts cancel --id <id> [--force] [--reason <text>]'],
+    check: ['usage: swarm-batch.ts check [--changes-only] [--idle-without-running-marker-sec N]'],
+    status: ['usage: swarm-batch.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N]'],
+    publish: ['usage: swarm-batch.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
+    'create-pr': ['usage: swarm-batch.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
+    list: ['usage: swarm-batch.ts list'],
   };
-  process.stdout.write(`${(lines[cmd] || ['usage: swarm.ts --help']).join('\n')}\n`);
+  process.stdout.write(`${(lines[cmd] || ['usage: swarm-batch.ts --help']).join('\n')}\n`);
 }
 
 function main(): void {
@@ -1399,9 +1231,8 @@ function main(): void {
     }
     if (cmd === 'cancel') {
       if (!optsRaw.id) fail('cancel requires --id');
-      const o = addCloseDefaults(optsRaw);
       const force = optsRaw.force === undefined ? true : Boolean(optsRaw.force);
-      cmdCancel({ ...o, id: String(optsRaw.id), force, reason: optsRaw.reason });
+      cmdCancel({ id: String(optsRaw.id), force, reason: optsRaw.reason });
       return;
     }
     if (cmd === 'check') {
