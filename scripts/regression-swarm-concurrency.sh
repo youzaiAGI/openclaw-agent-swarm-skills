@@ -16,10 +16,20 @@ command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 
 command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
 
 TIMEOUT_SEC="${1:-900}"
+CONCURRENCY="${2:-10}"
 POLL_SEC=15
 PREFIX="regtest-$(date +%Y%m%d-%H%M%S)-$RANDOM"
 TMP_REPO="$(mktemp -d "/tmp/swarm-regrepo-XXXXXX")"
 TASKS_FILE="/tmp/${PREFIX}-cases.tsv"
+
+if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || (( TIMEOUT_SEC <= 0 )); then
+  echo "ERROR: timeout must be a positive integer (seconds), got: $TIMEOUT_SEC" >&2
+  exit 1
+fi
+if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || (( CONCURRENCY < 2 )); then
+  echo "ERROR: concurrency must be an integer >= 2 (to cover both codex and claude), got: $CONCURRENCY" >&2
+  exit 1
+fi
 
 cleanup() {
   rm -rf "$TMP_REPO"
@@ -29,6 +39,8 @@ trap cleanup EXIT
 
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
+echo "[INFO] timeout: ${TIMEOUT_SEC}s"
+echo "[INFO] concurrency(total tasks): $CONCURRENCY"
 
 git -C "$TMP_REPO" init -q
 git -C "$TMP_REPO" config user.name "swarm-regression"
@@ -40,25 +52,35 @@ git -C "$TMP_REPO" add README.md
 git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
-for agent in codex claude; do
-  for i in $(seq 1 10); do
-    if (( i % 2 == 1 )); then
-      kind="ro"
-      expected_file="-"
-      expected_msg="-"
-      task="只读任务：请列出当前仓库根目录文件名并给一句总结；不要修改任何文件。"
+codex_idx=0
+claude_idx=0
+for i in $(seq 1 "$CONCURRENCY"); do
+  if (( i % 2 == 1 )); then
+    agent="codex"
+    codex_idx=$((codex_idx + 1))
+    idx="$codex_idx"
+  else
+    agent="claude"
+    claude_idx=$((claude_idx + 1))
+    idx="$claude_idx"
+  fi
+
+  if (( idx % 2 == 1 )); then
+    kind="write"
+    if [[ "$agent" == "codex" ]]; then
+      expected_file="REG_CDX_${idx}.md"
     else
-      kind="write"
-      if [[ "$agent" == "codex" ]]; then
-        expected_file="REG_CDX_${i}.md"
-      else
-        expected_file="REG_CLD_${i}.md"
-      fi
-      expected_msg="test: ${agent} regression write ${i}"
-      task="写任务：在仓库根目录创建 ${expected_file}，写两行文本并提交 commit，提交信息为 \"${expected_msg}\"。"
+      expected_file="REG_CLD_${idx}.md"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$agent" "$kind" "$i" "$expected_file" "$expected_msg" "$task" >> "$TASKS_FILE"
-  done
+    expected_msg="test: ${agent} regression write ${idx}"
+    task="写任务：在仓库根目录创建 ${expected_file}，写两行文本并提交 commit，提交信息为 \"${expected_msg}\"。"
+  else
+    kind="ro"
+    expected_file="-"
+    expected_msg="-"
+    task="只读任务：请列出当前仓库根目录文件名并给一句总结；不要修改任何文件。"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$agent" "$kind" "$idx" "$expected_file" "$expected_msg" "$task" >> "$TASKS_FILE"
 done
 
 declare -a TASK_IDS=()
@@ -99,6 +121,27 @@ if [[ "$spawn_fail" -ne 0 ]]; then
   exit 1
 fi
 echo "[INFO] spawn phase ok (${#TASK_IDS[@]} tasks)"
+echo "[INFO] tmux attach commands:"
+for id in "${TASK_IDS[@]}"; do
+  if [[ ! -f /tmp/"${id}".spawn.out ]]; then
+    echo "[ATTACH] $id :: (spawn output missing)"
+    continue
+  fi
+  session="$(SPAWN_JSON_PATH="/tmp/${id}.spawn.out" node -e '
+const fs = require("fs");
+const p = process.env.SPAWN_JSON_PATH || "";
+if (!p || !fs.existsSync(p)) process.exit(0);
+try {
+  const d = JSON.parse(fs.readFileSync(p, "utf8") || "{}");
+  process.stdout.write(String((d.task || {}).tmux_session || ""));
+} catch {}
+')"
+  if [[ -n "${session:-}" ]]; then
+    echo "[ATTACH] $id :: tmux attach -t $session"
+  else
+    echo "[ATTACH] $id :: (tmux session not found in spawn output)"
+  fi
+done
 
 start_ts="$(date +%s)"
 while true; do

@@ -786,6 +786,30 @@ function updateStatus(task, opts) {
 function isTerminalStatus(status) {
     return ['success', 'failed', 'stopped', 'needs_human'].includes(status);
 }
+function logQuietLongEnough(task, now, minQuietSec) {
+    const status = String(task.status || '');
+    if (isTerminalStatus(status))
+        return false;
+    const logPath = String(task.log || '');
+    if (!logPath || !fs.existsSync(logPath))
+        return true;
+    try {
+        const st = fs.statSync(logPath);
+        const quietSec = Math.floor((now.getTime() - st.mtime.getTime()) / 1000);
+        return quietSec >= minQuietSec;
+    }
+    catch {
+        return true;
+    }
+}
+function shouldKeepLastCheckEntry(task, now, maxAgeSec = 86400) {
+    const status = String(task.status || '');
+    if (!isTerminalStatus(status))
+        return true;
+    const updated = parseTs(task.updated_at || task.last_activity_at || task.created_at);
+    const ageSec = Math.floor((now.getTime() - updated.getTime()) / 1000);
+    return ageSec < maxAgeSec;
+}
 function archiveExpiredTasks(tasks, now, maxAgeSec = 86400) {
     ensureGlobalStateDir();
     for (const task of tasks) {
@@ -1020,16 +1044,24 @@ function cmdCancel(opts) {
 }
 function cmdCheck(opts) {
     const loaded = loadTasks();
-    const tasks = loaded.map((t) => updateStatus({ ...t }, opts));
-    for (const task of tasks) {
-        saveTask(task);
-    }
     const now = new Date();
-    archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
+    const refreshQuietSec = Math.max(0, numOrDefault(opts.checkRefreshLogQuietSec, 60));
+    const refreshFlags = loaded.map((t) => logQuietLongEnough(t, now, refreshQuietSec));
+    const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
+    for (let i = 0; i < tasks.length; i += 1) {
+        if (!refreshFlags[i])
+            continue;
+        saveTask(tasks[i]);
+    }
+    if (refreshFlags.some(Boolean)) {
+        archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
+    }
     const last = loadJson(GLOBAL_LAST_CHECK_PATH, {});
     const latest = {};
     const changes = [];
     for (const t of tasks) {
+        if (!shouldKeepLastCheckEntry(t, now, Number(opts.archiveAgeSec || 86400)))
+            continue;
         const tid = t.id;
         const status = t.status;
         latest[tid] = status;
