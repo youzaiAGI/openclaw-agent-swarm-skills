@@ -88,7 +88,6 @@ Cancel task:
 ```bash
 node "$SKILL_ROOT/scripts/swarm-batch.js" cancel \
   --id <task_id> \
-  [--force] \
   [--reason "<cancel reason>"]
 ```
 
@@ -108,16 +107,8 @@ node "$SKILL_ROOT/scripts/swarm-batch.js" list
 Check tasks (full or changes-only):
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm-batch.js" check \
-  [--idle-without-running-marker-sec N]
+node "$SKILL_ROOT/scripts/swarm-batch.js" check
 node "$SKILL_ROOT/scripts/swarm-batch.js" check --changes-only
-```
-
-Long-running confirmation threshold:
-
-```bash
-# 3h default; this example sets 2h
-node "$SKILL_ROOT/scripts/swarm-batch.js" check --idle-without-running-marker-sec 7200
 ```
 
 Publish finished task branch to remote:

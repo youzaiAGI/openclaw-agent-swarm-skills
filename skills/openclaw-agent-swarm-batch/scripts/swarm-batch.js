@@ -603,7 +603,7 @@ function updateStatus(task, opts) {
     const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
     const alive = tmuxAlive(session);
     const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
-    const runningConfirmSec = Math.max(60, Number(opts.idle_without_running_marker_sec ?? 10_800));
+    const runningConfirmSec = 10_800;
     let convergedReason = '';
     let metadataChanged = false;
     let next = old;
@@ -868,11 +868,8 @@ function cmdCancel(opts) {
     task.cancel = {
         at: now,
         by_user: true,
-        force: Boolean(opts.force),
         method,
         marker_seen: false,
-        graceful_attempted: false,
-        graceful_exited: false,
         session_killed: killed,
         reason,
     };
@@ -1110,8 +1107,6 @@ function cmdPublish(opts) {
             targetBranch,
             title: opts.title,
             body: opts.body,
-            idle_quiet_sec: opts.idleQuietSec,
-            auto_close_idle_sec: opts.autoCloseIdleSec,
         }, tasks, true, false);
         result.pr = prRes.pr || (tasks.find((t) => t.id === opts.id) || {}).pr || {};
     }
@@ -1146,12 +1141,8 @@ function numOrDefault(v, d) {
     return Number.isNaN(n) ? d : n;
 }
 function addTimingDefaults(opts) {
-    const idleWithout = numOrDefault(opts.idleWithoutRunningMarkerSec ?? opts.idleQuietSec, 10_800);
     return {
         ...opts,
-        idle_without_running_marker_sec: idleWithout,
-        // Backward-compatible aliases for external callers reading old field names.
-        idle_quiet_sec: idleWithout,
     };
 }
 function addRuntimeDefaults(opts) {
@@ -1179,9 +1170,9 @@ function showCommandHelp(cmd) {
         spawn: ['usage: swarm-batch.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
         'spawn-followup': ['usage: swarm-batch.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
         attach: ['usage: swarm-batch.ts attach --id <id> --message <text>'],
-        cancel: ['usage: swarm-batch.ts cancel --id <id> [--force] [--reason <text>]'],
-        check: ['usage: swarm-batch.ts check [--changes-only] [--idle-without-running-marker-sec N]'],
-        status: ['usage: swarm-batch.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N]'],
+        cancel: ['usage: swarm-batch.ts cancel --id <id> [--reason <text>]'],
+        check: ['usage: swarm-batch.ts check [--changes-only]'],
+        status: ['usage: swarm-batch.ts status [--id <id>|--query <q>]'],
         publish: ['usage: swarm-batch.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
         'create-pr': ['usage: swarm-batch.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
         list: ['usage: swarm-batch.ts list'],
@@ -1223,8 +1214,7 @@ function main() {
         if (cmd === 'cancel') {
             if (!optsRaw.id)
                 fail('cancel requires --id');
-            const force = optsRaw.force === undefined ? true : Boolean(optsRaw.force);
-            cmdCancel({ id: String(optsRaw.id), force, reason: optsRaw.reason });
+            cmdCancel({ id: String(optsRaw.id), reason: optsRaw.reason });
             return;
         }
         if (cmd === 'check') {

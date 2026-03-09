@@ -218,7 +218,6 @@ Representative shape:
   "cancel": {
     "at": "",
     "by_user": true,
-    "force": true,
     "method": "kill_only",
     "session_killed": true,
     "reason": ""
@@ -290,7 +289,6 @@ Prompt fields:
 
 Task running confirmation threshold:
 - default: `10800s` (3h)
-- CLI option: `--idle-without-running-marker-sec N`
 - behavior: ask user, no auto-kill.
 
 Refresh throttling:
@@ -388,7 +386,6 @@ They reflect current runtime behavior and are intentionally permissive for forwa
       "properties": {
         "at": { "type": "string", "format": "date-time" },
         "by_user": { "type": "boolean" },
-        "force": { "type": "boolean" },
         "method": { "type": "string", "enum": ["kill_only"] },
         "session_killed": { "type": "boolean" },
         "reason": { "type": "string" }

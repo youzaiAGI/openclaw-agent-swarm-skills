@@ -365,7 +365,7 @@ run_attach_cancel_case() {
   fi
 
   local cancel_json cancelled status reason2
-  cancel_json="$(node "$SWARM_JS" cancel --id "$task_id" --force --reason "regression_user_cancel")"
+  cancel_json="$(node "$SWARM_JS" cancel --id "$task_id" --reason "regression_user_cancel")"
   cancelled="$(CANCEL_JSON="$cancel_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");process.stdout.write(String(Boolean(d.cancelled)));')"
   status="$(CANCEL_JSON="$cancel_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");process.stdout.write(String(d.status||""));')"
   reason2="$(CANCEL_JSON="$cancel_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");process.stdout.write(String(d.converged_reason||""));')"
