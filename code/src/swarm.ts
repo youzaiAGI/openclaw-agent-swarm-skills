@@ -22,6 +22,16 @@ const RUNNING_MARKERS = [
   'esc to interrupt',
 ];
 const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL']);
+const MODE_INTERACTIVE = 'interactive';
+const MODE_BATCH = 'batch';
+const TERMINAL_STATUSES = new Set(['success', 'failed', 'stopped']);
+const INTERACTIVE_LOG_QUIET_SEC = 60;
+const BATCH_TIMEOUT_SEC = 10_800;
+const INTERACTIVE_PENDING_TIMEOUT_SEC = 10_800;
+const REMINDER_MAX = 3;
+const REMINDER_INTERVAL_SEC = 3600;
+
+type TaskMode = typeof MODE_INTERACTIVE | typeof MODE_BATCH;
 
 function printJson(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -228,10 +238,12 @@ function pickAgent(requested: string | undefined, tools: AnyObj): string {
 }
 
 function validateAgentCommand(agent: string): void {
-  const cp = run([agent, '--help'], undefined, false);
-  if (cp.code !== 0) {
-    const err = (cp.stderr || cp.stdout || '').trim();
-    fail(`agent command '${agent}' exists but '--help' failed: ${err || 'unknown error'}`);
+  const cp = run([agent, '--version'], undefined, false);
+  if (cp.code === 0) return;
+  const fallback = run([agent, '--help'], undefined, false);
+  if (fallback.code !== 0) {
+    const err = (fallback.stderr || fallback.stdout || cp.stderr || cp.stdout || '').trim();
+    fail(`agent command '${agent}' exists but validation failed: ${err || 'unknown error'}`);
   }
 }
 
@@ -251,6 +263,14 @@ function parseTs(v?: string): Date {
   if (!v) return new Date();
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? new Date() : d;
+}
+
+function normalizeMode(raw: any): TaskMode {
+  return String(raw || MODE_BATCH).toLowerCase() === MODE_INTERACTIVE ? MODE_INTERACTIVE : MODE_BATCH;
+}
+
+function modeSupportsAttach(modeRaw: any): boolean {
+  return normalizeMode(modeRaw) === MODE_INTERACTIVE;
 }
 
 function currentBranch(repo: string): string {
@@ -292,17 +312,37 @@ function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
 
-function buildAgentStartCommand(agent: string, exitPath: string): string {
-  let base = '';
-  if (agent === 'codex') base = 'codex --dangerously-bypass-approvals-and-sandbox';
-  else if (agent === 'claude') base = 'claude --dangerously-skip-permissions';
-  else fail(`unsupported agent: ${agent}`);
+function buildAgentStartCommand(agent: string, mode: TaskMode, promptPath: string, logPath: string, exitPath: string): string {
+  const promptQ = shellQuote(promptPath);
+  const logQ = shellQuote(logPath);
+  const exitQ = shellQuote(exitPath);
+  let interactiveBase = '';
+  let batchBase = '';
+  if (agent === 'codex') {
+    interactiveBase = 'codex --dangerously-bypass-approvals-and-sandbox';
+    batchBase = 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"';
+  } else if (agent === 'claude') {
+    interactiveBase = 'claude --dangerously-skip-permissions';
+    batchBase = 'claude --dangerously-skip-permissions -p "$prompt"';
+  } else {
+    fail(`unsupported agent: ${agent}`);
+  }
+
+  if (mode === MODE_BATCH) {
+    return [
+      'set -o pipefail;',
+      `prompt="$(cat ${promptQ})";`,
+      `${batchBase} >> ${logQ} 2>&1;`,
+      'ec=$?;',
+      `echo "$ec" > ${exitQ};`,
+    ].join(' ');
+  }
 
   return [
     'set -o pipefail;',
-    `${base};`,
+    `${interactiveBase};`,
     'ec=$?;',
-    `echo "$ec" > ${shellQuote(exitPath)};`,
+    `echo "$ec" > ${exitQ};`,
     'exec bash',
   ].join(' ');
 }
@@ -502,14 +542,14 @@ function buildPrompt(taskId: string, _repo: string, worktree: string, userTask: 
   ].join('\n');
 }
 
-function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string, userTask: string, parentTaskId = ''): AnyObj {
+function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string, mode: TaskMode, userTask: string, parentTaskId = ''): AnyObj {
   ensureGlobalStateDir();
   const logsDir = path.join(GLOBAL_STATE_DIR, 'logs');
   const promptsDir = path.join(GLOBAL_STATE_DIR, 'prompts');
   fs.mkdirSync(logsDir, { recursive: true });
   fs.mkdirSync(promptsDir, { recursive: true });
 
-  const session = `swarm-${taskId}`.replace(/\//g, '-');
+  const session = `swarm-${mode}-${taskId}`.replace(/\//g, '-');
   const promptPath = path.join(promptsDir, `${taskId}.txt`);
   const logPath = path.join(logsDir, `${taskId}.log`);
   const exitPath = path.join(logsDir, `${taskId}.exit`);
@@ -517,25 +557,32 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
   const promptText = buildPrompt(taskId, repo, wtMeta.worktree, userTask, parentTaskId);
   fs.writeFileSync(promptPath, promptText, 'utf-8');
   fs.writeFileSync(logPath, '', 'utf-8');
-
-  const cmd = buildAgentStartCommand(agent, exitPath);
-  tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
-  run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
-  if (!waitForAgentReady(session, agent, 20)) {
-    if (fs.existsSync(exitPath)) {
-      const tail = readLogExcerpt(logPath, 300);
-      tmuxCloseSession(session, { close_mode: 'kill_only' });
-      fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
-    }
-    // Avoid false negatives from pane command detection; keep session and continue.
-    sleepMs(1000);
+  if (mode === MODE_BATCH) {
+    fs.writeFileSync(exitPath, '', 'utf-8');
+    fs.rmSync(exitPath, { force: true });
   }
-  tmuxHandleStartupPrompts(session);
-  tmuxSendText(session, promptText);
+
+  const cmd = buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath);
+  tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
+  if (mode === MODE_INTERACTIVE) {
+    run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
+    if (!waitForAgentReady(session, agent, 20)) {
+      if (fs.existsSync(exitPath)) {
+        const tail = readLogExcerpt(logPath, 300);
+        tmuxCloseSession(session, { close_mode: 'kill_only' });
+        fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
+      }
+      // Avoid false negatives from pane command detection; keep session and continue.
+      sleepMs(1000);
+    }
+    tmuxHandleStartupPrompts(session);
+    tmuxSendText(session, promptText);
+  }
 
   const now = nowIso();
   const task: AnyObj = {
     id: taskId,
+    mode,
     status: 'running',
     agent,
     repo,
@@ -550,36 +597,92 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
     last_activity_at: now,
     log: logPath,
     exit_file: exitPath,
+    reminder_count: 0,
+    last_reminder_at: '',
   };
   return task;
 }
 
+function runShell(command: string, cwd: string, timeoutMs: number): AnyObj {
+  const res = spawnSync('bash', ['-lc', command], { cwd, encoding: 'utf-8', timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+  const timedOut = res.error?.name === 'TimeoutError';
+  return {
+    code: timedOut ? 124 : (res.status ?? 1),
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? (res.error ? String(res.error.message || res.error) : ''),
+    timed_out: timedOut,
+  };
+}
+
 function evaluateDefaultDod(task: AnyObj): AnyObj {
-  const worktree = task.worktree;
-  const baseBranch = task.base_branch;
-  const branch = task.branch;
-  const result: AnyObj = { checked: true, pass: false, commit: false, clean_worktree: false, reason: '' };
+  const worktree = String(task.worktree || '');
+  const result: AnyObj = {
+    checked: true,
+    pass: false,
+    reason: '',
+    worktree_clean: false,
+    requirements: {
+      require_commit: false,
+      require_push: false,
+      require_pr: false,
+      required_tests: [] as string[],
+    },
+    evidence: {
+      commit_count: 0,
+      pushed: null,
+      pr_opened: null,
+      tests: [] as AnyObj[],
+    },
+  };
   if (!worktree || !fs.existsSync(worktree)) {
     result.reason = 'worktree_missing';
     return result;
   }
-  if (task.status !== 'success') {
-    result.reason = `status_not_success:${task.status}`;
+  if (!isTerminalStatus(String(task.status || ''))) {
+    result.reason = `status_not_terminal:${task.status || 'unknown'}`;
     return result;
   }
-  if (baseBranch && branch) {
-    const cp = run(['git', 'rev-list', '--count', `${baseBranch}..${branch}`], worktree, false);
-    result.commit = cp.code === 0 && Number.parseInt((cp.stdout || '0').trim() || '0', 10) > 0;
-  }
   const sp = run(['git', 'status', '--porcelain'], worktree, false);
-  result.clean_worktree = sp.code === 0 && sp.stdout.trim() === '';
-  result.pass = Boolean(result.commit && result.clean_worktree);
-  if (!result.pass) {
-    if (!result.commit) result.reason = 'no_commit_on_task_branch';
-    else if (!result.clean_worktree) result.reason = 'worktree_not_clean';
-  } else {
-    result.reason = 'ok';
+  result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
+  const req = task?.dod?.requirements && typeof task.dod.requirements === 'object' ? task.dod.requirements : {};
+  const requiredTests = Array.isArray(req.required_tests)
+    ? req.required_tests.map((x: any) => String(x || '').trim()).filter(Boolean)
+    : [];
+  result.requirements = {
+    require_commit: Boolean(req.require_commit),
+    require_push: Boolean(req.require_push),
+    require_pr: Boolean(req.require_pr),
+    required_tests: requiredTests,
+  };
+
+  const testTimeoutSec = Math.max(1, numOrDefault(req.test_timeout_sec, 300));
+  let testsPass = true;
+  for (const cmd of requiredTests) {
+    const startedAt = Date.now();
+    const cp = runShell(cmd, worktree, testTimeoutSec * 1000);
+    const durationMs = Date.now() - startedAt;
+    const item = {
+      cmd,
+      pass: cp.code === 0,
+      exit_code: cp.code,
+      timed_out: Boolean(cp.timed_out),
+      duration_ms: durationMs,
+      output: (cp.stdout || cp.stderr || '').slice(-2000),
+    };
+    result.evidence.tests.push(item);
+    if (!item.pass) testsPass = false;
   }
+
+  if (!result.worktree_clean) {
+    result.reason = 'worktree_not_clean';
+    return result;
+  }
+  if (!testsPass) {
+    result.reason = 'required_tests_failed';
+    return result;
+  }
+  result.pass = true;
+  result.reason = 'ok';
   return result;
 }
 
@@ -712,11 +815,18 @@ function findTaskCandidates(tasks: AnyObj[], query: string): AnyObj[] {
 }
 
 function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
-  const old = task.status || 'unknown';
+  const mode = normalizeMode(task.mode);
+  task.mode = mode;
+  const old = String(task.status || 'running');
   const session = task.tmux_session || '';
   const exitFile = task.exit_file || '';
   const logPath = task.log || '';
   const now = new Date();
+  const nowIsoStr = now.toISOString();
+  if (isTerminalStatus(old)) {
+    task.dod = evaluateDefaultDod(task);
+    return task;
+  }
 
   const excerpt = readLogExcerpt(logPath);
   const cleanExcerpt = stripAnsi(excerpt);
@@ -724,74 +834,90 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
 
   const prevExcerpt = task._last_excerpt || '';
   if (cleanExcerpt !== prevExcerpt) {
-    task.last_activity_at = now.toISOString();
+    task.last_activity_at = nowIsoStr;
     task._last_excerpt = cleanExcerpt;
   }
 
   const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
-  const idleSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
-
+  const runSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
   const alive = tmuxAlive(session);
-  const paneExcerpt = alive ? stripAnsi(tmuxCapturePane(session, 160)) : '';
+  const paneExcerpt = alive ? stripAnsi(tmuxCapturePane(session, 180)) : '';
   const mergedExcerpt = [cleanExcerpt, paneExcerpt].filter(Boolean).join('\n');
-  const hasWait = textContainsAny(mergedExcerpt, WAITING_MARKERS);
   const hasRunningHint = textContainsAny(mergedExcerpt, RUNNING_MARKERS);
-  const idleWithoutRunningMarkerSec = opts.idle_without_running_marker_sec ?? 30;
-  const idleWithRunningMarkerSec = opts.idle_with_running_marker_sec ?? 300;
-  const shouldAutoClose = (!hasRunningHint && idleSec >= idleWithoutRunningMarkerSec)
-    || (hasRunningHint && idleSec >= idleWithRunningMarkerSec);
   let convergedReason = '';
 
-  let next = old;
-  if (!alive) {
-    if (exitFile && fs.existsSync(exitFile)) {
+  let next = old as string;
+  if (mode === MODE_BATCH) {
+    const hasExit = Boolean(exitFile && fs.existsSync(exitFile));
+    if (hasExit) {
       const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
       const code = Number.parseInt(codeText, 10);
       task.exit_code = Number.isNaN(code) ? 1 : code;
       next = String(task.exit_code) === '0' ? 'success' : 'failed';
       convergedReason = `exit_file_code:${task.exit_code}`;
-    } else if (['running', 'awaiting_input', 'auto_closing'].includes(old)) {
-      next = 'stopped';
-      convergedReason = 'tmux_not_alive_no_exit_file';
-    }
-  } else {
-    if (shouldAutoClose) {
-      // Reclaim stale interactive sessions aggressively once idle threshold is reached.
-      next = 'auto_closing';
-      if (tmuxCloseSession(session, { ...opts, exit_file: exitFile })) {
-        if (exitFile && fs.existsSync(exitFile)) {
-          const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
-          const code = Number.parseInt(codeText, 10);
-          task.exit_code = Number.isNaN(code) ? 1 : code;
-          next = String(task.exit_code) === '0' ? 'success' : 'failed';
-          convergedReason = hasRunningHint
-            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_exit_code:${task.exit_code}`
-            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_exit_code:${task.exit_code}`;
-        } else {
-          next = 'stopped';
-          convergedReason = hasRunningHint
-            ? `auto_close_idle_with_running_marker_${idleWithRunningMarkerSec}s_no_exit_file`
-            : `auto_close_idle_no_running_marker_${idleWithoutRunningMarkerSec}s_no_exit_file`;
-        }
-      } else {
-        next = 'needs_human';
-        convergedReason = hasRunningHint
-          ? `auto_close_failed_after_idle_with_running_marker_${idleWithRunningMarkerSec}s`
-          : `auto_close_failed_after_idle_no_running_marker_${idleWithoutRunningMarkerSec}s`;
+      // exit exists but session still alive means leaked tmux shell; reclaim it.
+      if (alive) tmuxCloseSession(session, { close_mode: 'kill_only' });
+      try {
+        fs.rmSync(exitFile, { force: true });
+      } catch {
+        // Ignore exit cleanup failure.
       }
-    } else if (hasWait) {
-      next = 'awaiting_input';
-    } else if (exitFile && fs.existsSync(exitFile)) {
-      next = 'auto_closing';
+    } else if (!alive) {
+      next = 'stopped';
+      convergedReason = 'tmux_not_alive_no_exit_file_batch';
     } else {
       next = 'running';
+    }
+  } else {
+    if (!alive) {
+      next = 'stopped';
+      convergedReason = 'tmux_not_alive_interactive';
+    } else if (exitFile && fs.existsSync(exitFile)) {
+      // Interactive mode converges to stopped once agent exits unexpectedly.
+      const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
+      const code = Number.parseInt(codeText, 10);
+      task.exit_code = Number.isNaN(code) ? 1 : code;
+      next = 'stopped';
+      convergedReason = `interactive_exit_code:${task.exit_code}`;
+    } else {
+      next = hasRunningHint ? 'running' : 'pending';
     }
   }
 
   task.status = next;
-  if (next !== old) task.updated_at = now.toISOString();
+  // Reminder policy: timeout prompts at most three times.
+  const reminderCount = Math.max(0, Number.parseInt(String(task.reminder_count || 0), 10) || 0);
+  const lastReminderRaw = String(task.last_reminder_at || '');
+  const lastReminder = lastReminderRaw ? parseTs(lastReminderRaw) : new Date(0);
+  const sinceLastReminderSec = Math.max(0, Math.floor((now.getTime() - lastReminder.getTime()) / 1000));
+  const canRemind = reminderCount < REMINDER_MAX && sinceLastReminderSec >= REMINDER_INTERVAL_SEC;
+  const isInteractivePending = mode === MODE_INTERACTIVE && next === 'pending';
+  const isBatchLongRunning = mode === MODE_BATCH && next === 'running' && runSec >= BATCH_TIMEOUT_SEC;
+  if (isInteractivePending || isBatchLongRunning) {
+    if (!task.timeout_since) task.timeout_since = nowIsoStr;
+    if (canRemind) {
+      task.reminder_count = reminderCount + 1;
+      task.last_reminder_at = nowIsoStr;
+      task.next_step_hint = isInteractivePending
+        ? '任务长期 pending，建议执行 cancel 关闭 session（状态会变为 stopped）'
+        : '任务运行超过3小时，建议检查日志后决定是否 cancel';
+    }
+  } else {
+    if (next !== old) {
+      task.timeout_since = '';
+      task.pending_since = '';
+      task.next_step_hint = '';
+    }
+  }
+  if (mode === MODE_INTERACTIVE && next === 'pending' && old !== 'pending') {
+    task.pending_since = nowIsoStr;
+  }
+  if (mode === MODE_INTERACTIVE && next === 'running' && old === 'pending') {
+    task.pending_since = '';
+  }
+  if (next !== old) task.updated_at = nowIsoStr;
   if (next !== old && isTerminalStatus(next)) {
-    task.converged_at = now.toISOString();
+    task.converged_at = nowIsoStr;
     if (convergedReason) task.converged_reason = convergedReason;
   }
   task.dod = evaluateDefaultDod(task);
@@ -799,7 +925,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
 }
 
 function isTerminalStatus(status: string): boolean {
-  return ['success', 'failed', 'stopped', 'needs_human'].includes(status);
+  return TERMINAL_STATUSES.has(status);
 }
 
 function logQuietLongEnough(task: AnyObj, now: Date, minQuietSec: number): boolean {
@@ -843,18 +969,22 @@ function archiveExpiredTasks(tasks: AnyObj[], now: Date, maxAgeSec = 86400): voi
 }
 
 function taskSummary(task: AnyObj): AnyObj {
+  const mode = normalizeMode(task.mode);
   const status = task.status || 'unknown';
   const publish = task.publish || {};
   const pr = task.pr || {};
   let nextStep = '检查 session 与任务状态，必要时重试';
-  if (['running', 'awaiting_input'].includes(status)) nextStep = 'attach 补充要求，或等待 heartbeat 下次轮询';
+  if (mode === MODE_INTERACTIVE && ['running', 'pending'].includes(status)) nextStep = '可 attach 补充要求，或等待下一次轮询';
+  else if (mode === MODE_BATCH && status === 'running') nextStep = '等待任务结束，或执行 cancel 终止任务';
   else if (status === 'success') {
     if (publish.ok) nextStep = pr.ok ? 'PR/MR 已创建，继续评审与合并' : '分支已推送，执行 create-pr 或按手工链接创建 PR/MR';
     else nextStep = '任务已完成，是否执行 publish --auto-pr 推送并创建 PR/MR';
-  } else if (['failed', 'needs_human'].includes(status)) nextStep = '查看日志并 attach 修正，或创建 follow-up 任务';
+  } else if (['failed', 'stopped'].includes(status)) nextStep = '查看日志后创建 follow-up 任务（new|reuse）';
+  if (task.next_step_hint) nextStep = String(task.next_step_hint);
 
   return {
     id: task.id,
+    mode,
     agent: task.agent,
     repo: task.repo,
     worktree: task.worktree,
@@ -870,6 +1000,7 @@ function taskSummary(task: AnyObj): AnyObj {
 }
 
 function cmdSpawn(opts: AnyObj): void {
+  const mode = normalizeMode(opts.mode);
   const repo = path.resolve(opts.repo);
   if (!isGitRepo(repo)) fail(`target is not a git repository: ${repo}`);
   const tools = detectTools();
@@ -887,7 +1018,7 @@ function cmdSpawn(opts: AnyObj): void {
     while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
   }
   const wtMeta = createWorktree(repo, taskId);
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task);
   saveTask(task);
   printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
 }
@@ -901,8 +1032,12 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const tasks = loadTasks();
   const parent = tasks.find((t) => t.id === opts.from);
   if (!parent) fail(`task not found: ${opts.from}`);
+  if (!isTerminalStatus(String(parent.status || ''))) {
+    fail(`follow-up only allowed for terminal parent task, got: ${parent.status || 'unknown'}`);
+  }
   const repo = path.resolve(parent.repo || '');
   if (!isGitRepo(repo)) fail(`parent repo is invalid or not git: ${repo}`);
+  const mode = normalizeMode(opts.mode || parent.mode || MODE_BATCH);
   const existing = new Set(tasks.map((t) => String(t.id || '')));
   let taskId = String(opts.name || '').trim();
   if (taskId) {
@@ -919,7 +1054,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
     wtMeta = meta;
   }
   const parentId = parent.id || '';
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, opts.task, parentId);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId);
   task.worktree_mode = opts.worktreeMode;
   saveTask(task);
   printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
@@ -931,8 +1066,23 @@ function cmdAttach(opts: AnyObj): void {
   if (!task) fail(`task not found: ${opts.id}`);
   const msg = String(opts.message || '').trim();
   if (!msg) fail('message is empty');
+  const mode = normalizeMode(task.mode);
+  if (!modeSupportsAttach(mode)) {
+    printJson({
+      ok: true,
+      id: opts.id,
+      sent: false,
+      requires_confirmation: true,
+      reason: 'attach_not_supported_in_batch_mode',
+      actions: [
+        { action: 'spawn_followup_new_worktree', recommended: true },
+        { action: 'spawn_followup_reuse_worktree', recommended: false },
+      ],
+    });
+    return;
+  }
   const status = task.status || 'unknown';
-  const runningLike = new Set(['running', 'awaiting_input', 'auto_closing']);
+  const runningLike = new Set(['running', 'pending']);
   if (!runningLike.has(status)) {
     printJson({
       ok: true,
@@ -943,7 +1093,6 @@ function cmdAttach(opts: AnyObj): void {
       actions: [
         { action: 'spawn_followup_new_worktree', recommended: true },
         { action: 'spawn_followup_reuse_worktree', recommended: false },
-        { action: 'force_attach_legacy_session', recommended: false },
       ],
     });
     return;
@@ -1046,7 +1195,11 @@ function cmdCheck(opts: AnyObj): void {
   const loaded = loadTasks();
   const now = new Date();
   const refreshQuietSec = Math.max(0, numOrDefault(opts.checkRefreshLogQuietSec, 60));
-  const refreshFlags = loaded.map((t) => logQuietLongEnough(t, now, refreshQuietSec));
+  const refreshFlags = loaded.map((t) => {
+    const mode = normalizeMode(t.mode);
+    if (mode === MODE_INTERACTIVE) return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
+    return logQuietLongEnough(t, now, refreshQuietSec);
+  });
   const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
 
   for (let i = 0; i < tasks.length; i += 1) {
@@ -1056,33 +1209,58 @@ function cmdCheck(opts: AnyObj): void {
   if (refreshFlags.some(Boolean)) {
     archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
   }
-  const last = loadJson<Record<string, string>>(GLOBAL_LAST_CHECK_PATH, {});
-  const latest: Record<string, string> = {};
+  const lastRaw = loadJson<AnyObj>(GLOBAL_LAST_CHECK_PATH, {});
+  const last = lastRaw && typeof lastRaw === 'object' && lastRaw.tasks && typeof lastRaw.tasks === 'object'
+    ? lastRaw.tasks as Record<string, AnyObj>
+    : lastRaw as Record<string, AnyObj>;
+  const latest: Record<string, AnyObj> = {};
   const changes: AnyObj[] = [];
   for (const t of tasks) {
     if (!shouldKeepLastCheckEntry(t, now, Number(opts.archiveAgeSec || 86400))) continue;
     const tid = t.id;
     const status = t.status;
-    latest[tid] = status;
-    const prev = last[tid];
-    if (prev !== status) {
+    const reminderCount = Math.max(0, Number.parseInt(String(t.reminder_count || 0), 10) || 0);
+    const statusKey = `${status}|reminder_count=${reminderCount}`;
+    latest[tid] = {
+      status,
+      status_key: statusKey,
+      updated_at: t.updated_at || now.toISOString(),
+      reminder_count: reminderCount,
+      last_notified_at: t.last_reminder_at || '',
+    };
+    const prev: any = last[tid];
+    const prevStatusKey = typeof prev === 'string' ? prev : String(prev?.status_key || '');
+    const prevStatus = typeof prev === 'string' ? String(prev).split('|')[0] : String(prev?.status || '');
+    if (prevStatusKey !== statusKey) {
       const publish = t.publish || {};
       const shouldPrompt = status === 'success' && (t.dod || {}).pass && !publish.ok;
+      const timeoutPrompt = reminderCount > 0
+        && (String(prevStatusKey).includes(`reminder_count=${reminderCount}`) === false)
+        ? (t.next_step_hint || '')
+        : '';
       changes.push({
         id: tid,
+        mode: normalizeMode(t.mode),
         repo: t.repo,
         worktree: t.worktree,
         tmux_session: t.tmux_session,
-        from: prev,
+        from: prevStatus,
         to: status,
         converged_reason: t.converged_reason || '',
         dod: t.dod || {},
         result_excerpt: (t.result_excerpt || '').slice(-300),
+        timeout_prompt: timeoutPrompt,
         publish_prompt: shouldPrompt ? '任务已完成且DoD通过，是否现在执行 publish --auto-pr 推送远程并创建PR/MR？' : '',
       });
     }
   }
-  saveJson(GLOBAL_LAST_CHECK_PATH, latest);
+  saveJson(GLOBAL_LAST_CHECK_PATH, {
+    meta: {
+      updated_at: now.toISOString(),
+      archive_age_sec: Number(opts.archiveAgeSec || 86400),
+    },
+    tasks: latest,
+  });
   const activeTasks = opts.changesOnly ? [] : loadTasks();
   printJson({ ok: true, registry: GLOBAL_TASKS_DIR, changes_only: Boolean(opts.changesOnly), changes, tasks: activeTasks });
 }
@@ -1100,8 +1278,12 @@ function cmdStatus(opts: AnyObj): void {
   if (opts.id) {
     const idx = tasks.findIndex((t) => t.id === opts.id);
     if (idx < 0) fail(`task not found: ${opts.id}`);
-    const refreshed = updateStatus({ ...tasks[idx] }, opts);
-    tasks[idx] = refreshed;
+    const current = { ...tasks[idx] };
+    if (isTerminalStatus(String(current.status || ''))) {
+      printJson({ ok: true, task: taskSummary(current) });
+      return;
+    }
+    const refreshed = updateStatus(current, opts);
     saveTask(refreshed);
     printJson({ ok: true, task: taskSummary(refreshed) });
     return;
@@ -1120,8 +1302,12 @@ function cmdStatus(opts: AnyObj): void {
     }
     const target = candidates[0];
     const idx = tasks.findIndex((t) => t.id === target.id);
-    const refreshed = updateStatus({ ...tasks[idx] }, opts);
-    tasks[idx] = refreshed;
+    const current = { ...tasks[idx] };
+    if (isTerminalStatus(String(current.status || ''))) {
+      printJson({ ok: true, task: taskSummary(current) });
+      return;
+    }
+    const refreshed = updateStatus(current, opts);
     saveTask(refreshed);
     printJson({ ok: true, task: taskSummary(refreshed) });
     return;
@@ -1355,12 +1541,12 @@ function showHelp(): void {
 
 function showCommandHelp(cmd: string): void {
   const lines: Record<string, string[]> = {
-    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--agent codex|claude] [--name <name>]'],
-    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude] [--name <name>]'],
+    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude] [--name <name>]'],
+    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--mode interactive|batch] [--agent codex|claude] [--name <name>]'],
     attach: ['usage: swarm.ts attach --id <id> --message <text>'],
     cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>] [--close-mode graceful_then_kill|kill_only]'],
-    check: ['usage: swarm.ts check [--changes-only] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--close-mode graceful_then_kill|kill_only]'],
-    status: ['usage: swarm.ts status [--id <id>|--query <q>] [--idle-without-running-marker-sec N] [--idle-with-running-marker-sec N] [--close-mode graceful_then_kill|kill_only]'],
+    check: ['usage: swarm.ts check [--changes-only]'],
+    status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
     publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
     'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
     list: ['usage: swarm.ts list'],
@@ -1383,13 +1569,26 @@ function main(): void {
     }
     if (cmd === 'spawn') {
       if (!optsRaw.repo || !optsRaw.task) fail('spawn requires --repo and --task');
-      cmdSpawn({ repo: String(optsRaw.repo), task: String(optsRaw.task), agent: optsRaw.agent, name: optsRaw.name });
+      cmdSpawn({
+        repo: String(optsRaw.repo),
+        task: String(optsRaw.task),
+        mode: optsRaw.mode,
+        agent: optsRaw.agent,
+        name: optsRaw.name,
+      });
       return;
     }
     if (cmd === 'spawn-followup') {
       if (!optsRaw.from || !optsRaw.task || !optsRaw.worktreeMode) fail('spawn-followup requires --from --task --worktree-mode');
       if (!['new', 'reuse'].includes(String(optsRaw.worktreeMode))) fail('worktree mode must be new|reuse');
-      cmdSpawnFollowup({ from: String(optsRaw.from), task: String(optsRaw.task), worktreeMode: String(optsRaw.worktreeMode), agent: optsRaw.agent, name: optsRaw.name });
+      cmdSpawnFollowup({
+        from: String(optsRaw.from),
+        task: String(optsRaw.task),
+        worktreeMode: String(optsRaw.worktreeMode),
+        mode: optsRaw.mode,
+        agent: optsRaw.agent,
+        name: optsRaw.name,
+      });
       return;
     }
     if (cmd === 'attach') {

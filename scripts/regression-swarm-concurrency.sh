@@ -96,6 +96,7 @@ while IFS=$'\t' read -r agent kind idx expected_file expected_msg task; do
   (
     node "$SWARM_JS" spawn \
       --repo "$TMP_REPO" \
+      --mode batch \
       --agent "$agent" \
       --name "$task_id" \
       --task "$task" >/tmp/"${task_id}".spawn.out 2>/tmp/"${task_id}".spawn.err
@@ -156,7 +157,7 @@ while true; do
   summary="$(SUMMARY_INPUT_JSON="$json" IDS_CSV="$(IFS=,; echo "${TASK_IDS[*]}")" node -e '
 const data = JSON.parse(process.env.SUMMARY_INPUT_JSON || "{}");
 const ids = new Set((process.env.IDS_CSV || "").split(",").filter(Boolean));
-const terminals = new Set(["success", "failed", "stopped", "needs_human"]);
+const terminals = new Set(["success", "failed", "stopped"]);
 let found = 0;
 let done = 0;
 const rows = [];
@@ -258,7 +259,7 @@ const id=String(process.env.TARGET_TASK_ID||"");
 const t=(d.tasks||[]).find(x=>String(x.id||"")===id);
 process.stdout.write(String((t&&t.status)||"missing"));
 ')"
-    if [[ "$status" == "success" || "$status" == "failed" || "$status" == "stopped" || "$status" == "needs_human" ]]; then
+    if [[ "$status" == "success" || "$status" == "failed" || "$status" == "stopped" ]]; then
       return 0
     fi
     sleep 5
@@ -286,6 +287,7 @@ run_attach_regression_case() {
 
   node "$SWARM_JS" spawn \
     --repo "$TMP_REPO" \
+    --mode interactive \
     --agent "$agent" \
     --name "$attach_task_id" \
     --task "$spawn_task" >/tmp/"${attach_task_id}".spawn.out 2>/tmp/"${attach_task_id}".spawn.err
