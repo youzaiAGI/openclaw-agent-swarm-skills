@@ -6,7 +6,7 @@
 - `interactive`：长驻 tmux 会话，可 `attach`
 - `batch`：非交互执行，不支持 `attach`
 
-英文主文档见 [README.md](/Users/youzai/Desktop/openclaw-agent-swarm-skills/README.md)。
+英文主文档见 [README.md](../README.md)。
 
 ## 环境要求
 

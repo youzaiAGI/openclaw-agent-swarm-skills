@@ -6,7 +6,7 @@ This repository now ships a single implementation that supports both task modes:
 - `interactive`: long-lived tmux session, supports `attach`
 - `batch`: non-interactive agent run inside tmux, no `attach`
 
-Chinese documentation is available at [docs/README.zh-CN.md](/Users/youzai/Desktop/openclaw-agent-swarm-skills/docs/README.zh-CN.md).
+Chinese documentation is available at [docs/README.zh-CN.md](docs/README.zh-CN.md).
 
 ## Requirements
 
@@ -153,9 +153,9 @@ This wrapper uses `flock` so only one check cycle runs at a time.
 
 Source of truth:
 
-- [swarm.ts](/Users/youzai/Desktop/openclaw-agent-swarm-skills/code/src/swarm.ts)
-- [build-skill.sh](/Users/youzai/Desktop/openclaw-agent-swarm-skills/scripts/build-skill.sh)
-- [SKILL.md](/Users/youzai/Desktop/openclaw-agent-swarm-skills/skills/openclaw-agent-swarm/SKILL.md)
+- [swarm.ts](code/src/swarm.ts)
+- [build-skill.sh](scripts/build-skill.sh)
+- [SKILL.md](skills/openclaw-agent-swarm/SKILL.md)
 
 Build:
 
@@ -187,4 +187,4 @@ Regression:
 
 ## License
 
-See [LICENSE](/Users/youzai/Desktop/openclaw-agent-swarm-skills/LICENSE).
+See [LICENSE](LICENSE).
