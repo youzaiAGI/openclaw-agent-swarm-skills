@@ -1,138 +1,110 @@
 ---
 name: openclaw-agent-swarm
-description: Orchestrate parallel coding agents with git worktree + tmux. Supports spawn, follow-up (new/reuse worktree), attach mid-task instructions, heartbeat-driven incremental status checks, and concise progress cards for OpenClaw chat.
+description: Unified swarm skill for interactive and batch coding tasks with git worktree + tmux, incremental check, and DoD updates.
 ---
 
 # OpenClaw Agent Swarm
 
-Use this skill to run coding tasks as background tmux sessions with isolated git worktrees, while keeping OpenClaw chat responsive.
+Use this skill to run coding tasks asynchronously in isolated worktrees.
 
 ## Hard Rules
 
-1. Refuse execution when target directory is not a git repository.
-2. Detect local tools before spawn:
-- If neither `codex` nor `claude` exists, stop and ask user to install at least one.
-- If user specifies `codex` or `claude`, honor it.
-- If user does not specify, auto-pick: `codex` first, then `claude`.
-3. Keep main chat async: return spawn result immediately (task id/session/worktree/branch).
-4. Agent runtime uses tmux interactive sessions, so follow-up instructions are sent via `attach`.
-5. Heartbeat reporting must be incremental: only return changed tasks on each check.
-6. DoD uses default built-in checks only:
-- task status is `success`
-- task branch has commits ahead of base branch
-- worktree is clean (`git status --porcelain` empty)
-7. If attaching to a non-running task, do not silently send. Return `requires_confirmation` with next action choices.
+1. Refuse execution when target path is not a git repository.
+2. Require local tools before spawn: `git`, `tmux`, and at least one of `codex` / `claude`.
+3. Default mode is `batch`; mode can be `interactive` or `batch`.
+4. `attach` is only allowed for running `interactive` tasks.
+5. Task status set is fixed: `running | pending | success | failed | stopped`.
+6. `check --changes-only` must only return changed tasks.
+7. DoD is checked after task reaches terminal status and can be updated by OpenClaw.
 
-## Global state
+## DoD Workflow
 
-Global task registry and heartbeat state:
+References:
+- `references/dod.md`
+
+Dual track:
+- OpenClaw reads `dod.md` and runs markdown-defined checks.
+- `swarm.ts` enforces command checks from `required_tests` passed at spawn.
+
+Default DoD conditions:
+- task is terminal (`success|failed|stopped`)
+- worktree is clean
+
+DoD writeback:
+- OpenClaw calls `update-dod` to update task DoD.
+- DoD schema is `status: pass|fail` and `result` object.
+- System exceptions are recorded in `dod.result.error`.
+
+## Global State
+
 - `~/.agents/agent-swarm/tasks/<task_id>.json`
 - `~/.agents/agent-swarm/agent-swarm-last-check.json`
-
-Runtime artifacts:
 - `~/.agents/agent-swarm/logs/<task_id>.log`
 - `~/.agents/agent-swarm/logs/<task_id>.exit`
 - `~/.agents/agent-swarm/prompts/<task_id>.txt`
-
-Worktree root:
 - `~/.agents/agent-swarm/worktree/<repo-name>/<task_id>`
 
 ## Commands
 
-Set reusable root:
-
 ```bash
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
-```
-
-Preferred runtime (no npm runtime dependency, Node 18+):
-
-```bash
 node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 ```
 
-Spawn task:
+Spawn:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo <git_repo_path> \
-  --task "<task description>" \
+  --task "<task>" \
+  [--mode interactive|batch] \
   [--agent codex|claude] \
-  [--name <task_name>]
+  [--required-test "<cmd>"]...
 ```
 
-Spawn follow-up task from existing task:
+Spawn follow-up:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from <task_id> \
-  --task "<followup instruction>" \
+  --task "<task>" \
   --worktree-mode new|reuse \
-  [--agent codex|claude] \
-  [--name <task_name>]
+  [--mode interactive|batch] \
+  [--required-test "<cmd>"]...
 ```
 
-Attach extra instruction to running task:
+Attach:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" attach \
-  --id <task_id> \
-  --message "<extra instruction>"
+node "$SKILL_ROOT/scripts/swarm.js" attach --id <task_id> --message "<message>"
 ```
 
-Cancel task:
+Cancel:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" cancel \
-  --id <task_id> \
-  [--force] \
-  [--reason "<cancel reason>"]
+node "$SKILL_ROOT/scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
 ```
 
-Status query:
+Check and status:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" status \
-  --id <task_id> \
-  [--idle-without-running-marker-sec N] \
-  [--idle-with-running-marker-sec N]
-node "$SKILL_ROOT/scripts/swarm.js" status --query "<id|branch|session|keyword>"
-```
-
-List tasks:
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" list
-```
-
-Check tasks (full or changes-only):
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" check \
-  [--idle-without-running-marker-sec N] \
-  [--idle-with-running-marker-sec N]
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" status --id <task_id>
 ```
 
-Publish finished task branch to remote:
+Update DoD:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish \
+node "$SKILL_ROOT/scripts/swarm.js" update-dod \
   --id <task_id> \
-  [--remote origin] \
-  [--target-branch <base_branch>] \
-  [--auto-pr]
+  --result-file <dod_result.json>
 ```
 
-Create PR/MR explicitly:
+Publish and PR:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" create-pr \
-  --id <task_id> \
-  [--remote origin] \
-  [--target-branch <base_branch>] \
-  [--title "<title>"] \
-  [--body "<body>"]
+node "$SKILL_ROOT/scripts/swarm.js" publish --id <task_id> [--auto-pr]
+node "$SKILL_ROOT/scripts/swarm.js" create-pr --id <task_id>
 ```
 
 Heartbeat wrapper:
@@ -140,53 +112,3 @@ Heartbeat wrapper:
 ```bash
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
-
-## Heartbeat Requirement
-
-This skill expects OpenClaw heartbeat polling to be configured.
-
-You must configure heartbeat in OpenClaw built-in `HEARTBEAT.md` (not this repo) to run:
-
-```bash
-bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
-```
-
-Without heartbeat, task status transitions (`running -> success/failed/needs_human`) may not be updated in time.
-
-## OpenClaw chat mapping
-
-Natural language intents map to commands:
-- “开个并发任务” -> `spawn`
-- “看看这个任务进展” -> `status --id` or `status --query`
-- “给这个任务补充要求” -> `attach`
-- “取消这个任务” -> `cancel --id`
-- “如果结束了继续做” -> `spawn-followup --worktree-mode new|reuse` (ask user first)
-- “轮询有没有变化” -> `check --changes-only`
-- “把这个任务推到远程” -> `publish`
-- “给这个任务创建PR/MR” -> `create-pr`
-
-Follow-up routing policy:
-- If task is `running/awaiting_input`: use `attach`.
-- If task is ended (`success/failed/stopped/needs_human`): do not attach directly.
-- Return `requires_confirmation`, then ask user:
-- New worktree: `spawn-followup --worktree-mode new`
-- Reuse worktree: `spawn-followup --worktree-mode reuse` (guarded)
-
-If query is ambiguous, return candidate tasks and ask user to pick one.
-
-When `check --changes-only` reports task changed to `success` and DoD passes:
-- OpenClaw should prompt user: “任务已完成，是否现在 push 并创建 PR/MR？”
-- Do not auto-publish by default; wait for user confirmation.
-
-## Response style
-
-For user-facing replies, convert JSON to concise cards. Do not dump raw JSON by default.
-
-Card template:
-- 任务: `<task_id>` (`<agent>` | `<repo>`)
-- 状态: `<status>`
-- 摘要: `<result_excerpt key points>`
-- DoD: `pass/fail` + `reason`
-- 下一步: `attach补充指令 / follow-up(new|reuse) / 人工处理`
-
-See `references/state-format.md` for JSON fields.

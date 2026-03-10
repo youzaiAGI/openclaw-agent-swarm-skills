@@ -15,9 +15,6 @@ const GLOBAL_TASKS_HISTORY_DIR = path.join(GLOBAL_TASKS_DIR, 'history');
 const GLOBAL_LAST_CHECK_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-last-check.json');
 const LEGACY_TASKS_PATH = path.join(GLOBAL_STATE_DIR, 'agent-swarm-tasks.json');
 
-const WAITING_MARKERS = [
-  'need your input', 'please confirm', 'please choose', 'waiting for your input', '请确认', '是否继续', '等待输入', '请输入',
-];
 const RUNNING_MARKERS = [
   'esc to interrupt',
 ];
@@ -30,6 +27,8 @@ const BATCH_TIMEOUT_SEC = 10_800;
 const INTERACTIVE_PENDING_TIMEOUT_SEC = 10_800;
 const REMINDER_MAX = 3;
 const REMINDER_INTERVAL_SEC = 3600;
+const DOD_PASS = 'pass';
+const DOD_FAIL = 'fail';
 
 type TaskMode = typeof MODE_INTERACTIVE | typeof MODE_BATCH;
 
@@ -471,30 +470,9 @@ function waitForAgentReady(session: string, agent: string, timeoutSec = 20): boo
   return false;
 }
 
-function tmuxCloseSession(session: string, opts: AnyObj = {}): boolean {
+function tmuxCloseSession(session: string): boolean {
   if (!tmuxAlive(session)) return true;
-  const modeRaw = String(opts.close_mode || 'graceful_then_kill').toLowerCase();
-  const mode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
-  const exitFile = String(opts.exit_file || '');
-
-  if (mode === 'graceful_then_kill') {
-    // 1) Send '/exit' only once.
-    run(['tmux', 'send-keys', '-t', session, '/exit'], undefined, false);
-    sleepMs(1000);
-
-    // 2) Confirm once with Enter. This path intentionally avoids pane command probing.
-    run(['tmux', 'send-keys', '-t', session, 'Enter'], undefined, false);
-
-    // 3) Poll exit file for up to 30s before forced kill.
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      if (exitFile && fs.existsSync(exitFile)) break;
-      if (!tmuxAlive(session)) break;
-      sleepMs(200);
-    }
-  }
-
-  // 4) Always kill session as final cleanup.
+  // Keep shutdown deterministic; no graceful probing branch.
   if (tmuxAlive(session)) run(['tmux', 'kill-session', '-t', session], undefined, false);
   return !tmuxAlive(session);
 }
@@ -542,7 +520,16 @@ function buildPrompt(taskId: string, _repo: string, worktree: string, userTask: 
   ].join('\n');
 }
 
-function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string, mode: TaskMode, userTask: string, parentTaskId = ''): AnyObj {
+function spawnInTmux(
+  taskId: string,
+  repo: string,
+  wtMeta: AnyObj,
+  agent: string,
+  mode: TaskMode,
+  userTask: string,
+  parentTaskId = '',
+  requiredTests: string[] = [],
+): AnyObj {
   ensureGlobalStateDir();
   const logsDir = path.join(GLOBAL_STATE_DIR, 'logs');
   const promptsDir = path.join(GLOBAL_STATE_DIR, 'prompts');
@@ -569,7 +556,7 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
     if (!waitForAgentReady(session, agent, 20)) {
       if (fs.existsSync(exitPath)) {
         const tail = readLogExcerpt(logPath, 300);
-        tmuxCloseSession(session, { close_mode: 'kill_only' });
+        tmuxCloseSession(session);
         fail(`agent failed before ready in tmux session: ${session}; ${tail}`);
       }
       // Avoid false negatives from pane command detection; keep session and continue.
@@ -591,14 +578,14 @@ function spawnInTmux(taskId: string, repo: string, wtMeta: AnyObj, agent: string
     base_branch: wtMeta.base_branch,
     tmux_session: session,
     task: userTask,
+    required_tests: requiredTests,
     parent_task_id: parentTaskId,
     created_at: now,
     updated_at: now,
     last_activity_at: now,
     log: logPath,
     exit_file: exitPath,
-    reminder_count: 0,
-    last_reminder_at: '',
+    timeout_since: '',
   };
   return task;
 }
@@ -614,76 +601,76 @@ function runShell(command: string, cwd: string, timeoutMs: number): AnyObj {
   };
 }
 
+function normalizeRequiredTests(raw: any): string[] {
+  if (Array.isArray(raw)) return raw.map((x) => String(x || '').trim()).filter(Boolean);
+  const one = String(raw || '').trim();
+  return one ? [one] : [];
+}
+
+function dodPassed(dod: AnyObj): boolean {
+  return String(dod?.status || '') === DOD_PASS;
+}
+
 function evaluateDefaultDod(task: AnyObj): AnyObj {
   const worktree = String(task.worktree || '');
+  const status = String(task.status || '');
+  const requiredTests = normalizeRequiredTests(task.required_tests);
   const result: AnyObj = {
-    checked: true,
-    pass: false,
     reason: '',
+    error: '',
+    terminal: isTerminalStatus(status),
     worktree_clean: false,
-    requirements: {
-      require_commit: false,
-      require_push: false,
-      require_pr: false,
-      required_tests: [] as string[],
-    },
-    evidence: {
-      commit_count: 0,
-      pushed: null,
-      pr_opened: null,
-      tests: [] as AnyObj[],
-    },
+    checks: [] as AnyObj[],
   };
+  const dod: AnyObj = {
+    status: DOD_FAIL,
+    result,
+    required_tests: requiredTests,
+    updated_at: nowIso(),
+  };
+
   if (!worktree || !fs.existsSync(worktree)) {
     result.reason = 'worktree_missing';
-    return result;
+    return dod;
   }
-  if (!isTerminalStatus(String(task.status || ''))) {
-    result.reason = `status_not_terminal:${task.status || 'unknown'}`;
-    return result;
+  if (!result.terminal) {
+    result.reason = `status_not_terminal:${status || 'unknown'}`;
+    return dod;
   }
   const sp = run(['git', 'status', '--porcelain'], worktree, false);
   result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
-  const req = task?.dod?.requirements && typeof task.dod.requirements === 'object' ? task.dod.requirements : {};
-  const requiredTests = Array.isArray(req.required_tests)
-    ? req.required_tests.map((x: any) => String(x || '').trim()).filter(Boolean)
-    : [];
-  result.requirements = {
-    require_commit: Boolean(req.require_commit),
-    require_push: Boolean(req.require_push),
-    require_pr: Boolean(req.require_pr),
-    required_tests: requiredTests,
-  };
+  result.checks.push({ name: 'worktree_clean', pass: result.worktree_clean });
 
-  const testTimeoutSec = Math.max(1, numOrDefault(req.test_timeout_sec, 300));
-  let testsPass = true;
+  if (!result.worktree_clean) {
+    result.reason = 'worktree_not_clean';
+    return dod;
+  }
+
+  const testTimeoutSec = 300;
   for (const cmd of requiredTests) {
     const startedAt = Date.now();
     const cp = runShell(cmd, worktree, testTimeoutSec * 1000);
     const durationMs = Date.now() - startedAt;
-    const item = {
+    const pass = cp.code === 0;
+    result.checks.push({
+      name: 'required_test',
       cmd,
-      pass: cp.code === 0,
+      pass,
       exit_code: cp.code,
       timed_out: Boolean(cp.timed_out),
       duration_ms: durationMs,
       output: (cp.stdout || cp.stderr || '').slice(-2000),
-    };
-    result.evidence.tests.push(item);
-    if (!item.pass) testsPass = false;
+    });
+    if (!pass) {
+      result.reason = 'required_tests_failed';
+      if (cp.timed_out) result.error = `required_test_timeout:${cmd}`;
+      return dod;
+    }
   }
 
-  if (!result.worktree_clean) {
-    result.reason = 'worktree_not_clean';
-    return result;
-  }
-  if (!testsPass) {
-    result.reason = 'required_tests_failed';
-    return result;
-  }
-  result.pass = true;
+  dod.status = DOD_PASS;
   result.reason = 'ok';
-  return result;
+  return dod;
 }
 
 function parseRemoteUrl(remoteUrl: string): AnyObj {
@@ -735,7 +722,7 @@ function ensurePublishable(task: AnyObj): void {
   if (task.status !== 'success') fail(`task is not success: ${task.status}`);
   const dod = task.dod || evaluateDefaultDod(task);
   task.dod = dod;
-  if (!dod.pass) fail(`task DoD not pass: ${dod.reason || 'unknown'}`);
+  if (!dodPassed(dod)) fail(`task DoD not pass: ${(dod.result || {}).reason || 'unknown'}`);
 }
 
 function runPush(worktree: string, remote: string, branch: string): [boolean, string] {
@@ -856,7 +843,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
       next = String(task.exit_code) === '0' ? 'success' : 'failed';
       convergedReason = `exit_file_code:${task.exit_code}`;
       // exit exists but session still alive means leaked tmux shell; reclaim it.
-      if (alive) tmuxCloseSession(session, { close_mode: 'kill_only' });
+      if (alive) tmuxCloseSession(session);
       try {
         fs.rmSync(exitFile, { force: true });
       } catch {
@@ -885,35 +872,12 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   }
 
   task.status = next;
-  // Reminder policy: timeout prompts at most three times.
-  const reminderCount = Math.max(0, Number.parseInt(String(task.reminder_count || 0), 10) || 0);
-  const lastReminderRaw = String(task.last_reminder_at || '');
-  const lastReminder = lastReminderRaw ? parseTs(lastReminderRaw) : new Date(0);
-  const sinceLastReminderSec = Math.max(0, Math.floor((now.getTime() - lastReminder.getTime()) / 1000));
-  const canRemind = reminderCount < REMINDER_MAX && sinceLastReminderSec >= REMINDER_INTERVAL_SEC;
   const isInteractivePending = mode === MODE_INTERACTIVE && next === 'pending';
   const isBatchLongRunning = mode === MODE_BATCH && next === 'running' && runSec >= BATCH_TIMEOUT_SEC;
   if (isInteractivePending || isBatchLongRunning) {
     if (!task.timeout_since) task.timeout_since = nowIsoStr;
-    if (canRemind) {
-      task.reminder_count = reminderCount + 1;
-      task.last_reminder_at = nowIsoStr;
-      task.next_step_hint = isInteractivePending
-        ? '任务长期 pending，建议执行 cancel 关闭 session（状态会变为 stopped）'
-        : '任务运行超过3小时，建议检查日志后决定是否 cancel';
-    }
-  } else {
-    if (next !== old) {
-      task.timeout_since = '';
-      task.pending_since = '';
-      task.next_step_hint = '';
-    }
-  }
-  if (mode === MODE_INTERACTIVE && next === 'pending' && old !== 'pending') {
-    task.pending_since = nowIsoStr;
-  }
-  if (mode === MODE_INTERACTIVE && next === 'running' && old === 'pending') {
-    task.pending_since = '';
+  } else if (next !== old) {
+    task.timeout_since = '';
   }
   if (next !== old) task.updated_at = nowIsoStr;
   if (next !== old && isTerminalStatus(next)) {
@@ -980,8 +944,6 @@ function taskSummary(task: AnyObj): AnyObj {
     if (publish.ok) nextStep = pr.ok ? 'PR/MR 已创建，继续评审与合并' : '分支已推送，执行 create-pr 或按手工链接创建 PR/MR';
     else nextStep = '任务已完成，是否执行 publish --auto-pr 推送并创建 PR/MR';
   } else if (['failed', 'stopped'].includes(status)) nextStep = '查看日志后创建 follow-up 任务（new|reuse）';
-  if (task.next_step_hint) nextStep = String(task.next_step_hint);
-
   return {
     id: task.id,
     mode,
@@ -1001,6 +963,7 @@ function taskSummary(task: AnyObj): AnyObj {
 
 function cmdSpawn(opts: AnyObj): void {
   const mode = normalizeMode(opts.mode);
+  const requiredTests = normalizeRequiredTests(opts.requiredTest);
   const repo = path.resolve(opts.repo);
   if (!isGitRepo(repo)) fail(`target is not a git repository: ${repo}`);
   const tools = detectTools();
@@ -1018,7 +981,8 @@ function cmdSpawn(opts: AnyObj): void {
     while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
   }
   const wtMeta = createWorktree(repo, taskId);
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, '', requiredTests);
+  task.dod = evaluateDefaultDod(task);
   saveTask(task);
   printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
 }
@@ -1038,6 +1002,9 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const repo = path.resolve(parent.repo || '');
   if (!isGitRepo(repo)) fail(`parent repo is invalid or not git: ${repo}`);
   const mode = normalizeMode(opts.mode || parent.mode || MODE_BATCH);
+  const requiredTests = normalizeRequiredTests(
+    opts.requiredTest !== undefined ? opts.requiredTest : parent.required_tests,
+  );
   const existing = new Set(tasks.map((t) => String(t.id || '')));
   let taskId = String(opts.name || '').trim();
   if (taskId) {
@@ -1054,8 +1021,9 @@ function cmdSpawnFollowup(opts: AnyObj): void {
     wtMeta = meta;
   }
   const parentId = parent.id || '';
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests);
   task.worktree_mode = opts.worktreeMode;
+  task.dod = evaluateDefaultDod(task);
   saveTask(task);
   printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
 }
@@ -1131,7 +1099,6 @@ function cmdCancel(opts: AnyObj): void {
 
   const status = String(task.status || 'unknown');
   const session = String(task.tmux_session || '');
-  const force = Boolean(opts.force);
   const reason = String(opts.reason || '').trim();
   const now = nowIso();
 
@@ -1140,12 +1107,7 @@ function cmdCancel(opts: AnyObj): void {
     return;
   }
 
-  const closeOpts = addCloseDefaults(opts);
-  const mode = force ? 'kill_only' : closeOpts.close_mode;
-  const killed = tmuxCloseSession(session, {
-    close_mode: mode,
-    exit_file: task.exit_file || '',
-  });
+  const killed = tmuxCloseSession(session);
 
   if (!killed) {
     printJson({
@@ -1158,7 +1120,7 @@ function cmdCancel(opts: AnyObj): void {
     return;
   }
 
-  const method = force ? 'force_only' : mode;
+  const method = 'kill_only';
 
   task.status = 'stopped';
   task.updated_at = now;
@@ -1170,11 +1132,7 @@ function cmdCancel(opts: AnyObj): void {
   task.cancel = {
     at: now,
     by_user: true,
-    force,
     method,
-    marker_seen: false,
-    graceful_attempted: mode === 'graceful_then_kill',
-    graceful_exited: false,
     session_killed: killed,
     reason,
   };
@@ -1194,11 +1152,10 @@ function cmdCancel(opts: AnyObj): void {
 function cmdCheck(opts: AnyObj): void {
   const loaded = loadTasks();
   const now = new Date();
-  const refreshQuietSec = Math.max(0, numOrDefault(opts.checkRefreshLogQuietSec, 60));
   const refreshFlags = loaded.map((t) => {
     const mode = normalizeMode(t.mode);
     if (mode === MODE_INTERACTIVE) return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
-    return logQuietLongEnough(t, now, refreshQuietSec);
+    return true;
   });
   const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
 
@@ -1219,28 +1176,47 @@ function cmdCheck(opts: AnyObj): void {
     if (!shouldKeepLastCheckEntry(t, now, Number(opts.archiveAgeSec || 86400))) continue;
     const tid = t.id;
     const status = t.status;
-    const reminderCount = Math.max(0, Number.parseInt(String(t.reminder_count || 0), 10) || 0);
-    const statusKey = `${status}|reminder_count=${reminderCount}`;
+    const mode = normalizeMode(t.mode);
     latest[tid] = {
-      status,
-      status_key: statusKey,
+      last_status: status,
       updated_at: t.updated_at || now.toISOString(),
-      reminder_count: reminderCount,
-      last_notified_at: t.last_reminder_at || '',
+      reminder_count: 0,
+      last_reminder_at: '',
     };
     const prev: any = last[tid];
-    const prevStatusKey = typeof prev === 'string' ? prev : String(prev?.status_key || '');
-    const prevStatus = typeof prev === 'string' ? String(prev).split('|')[0] : String(prev?.status || '');
-    if (prevStatusKey !== statusKey) {
+    const prevStatus = String(prev?.last_status || '');
+    const prevReminderCount = Math.max(0, Number.parseInt(String(prev?.reminder_count || 0), 10) || 0);
+    const prevReminderAt = String(prev?.last_reminder_at || '');
+    let reminderCount = prevReminderCount;
+    let lastReminderAt = prevReminderAt;
+
+    const timeoutSince = parseTs(t.timeout_since || t.last_activity_at || t.updated_at || t.created_at);
+    const timeoutAgeSec = Math.max(0, Math.floor((now.getTime() - timeoutSince.getTime()) / 1000));
+    const lastReminderTs = prevReminderAt ? parseTs(prevReminderAt) : new Date(0);
+    const sinceLastReminderSec = Math.max(0, Math.floor((now.getTime() - lastReminderTs.getTime()) / 1000));
+    const needReminderByStatus = (mode === MODE_INTERACTIVE && status === 'pending' && timeoutAgeSec >= INTERACTIVE_PENDING_TIMEOUT_SEC)
+      || (mode === MODE_BATCH && status === 'running' && timeoutAgeSec >= BATCH_TIMEOUT_SEC);
+    const emitReminder = needReminderByStatus
+      && reminderCount < REMINDER_MAX
+      && sinceLastReminderSec >= REMINDER_INTERVAL_SEC;
+    if (emitReminder) {
+      reminderCount += 1;
+      lastReminderAt = now.toISOString();
+    }
+    latest[tid].reminder_count = reminderCount;
+    latest[tid].last_reminder_at = lastReminderAt;
+
+    if (prevStatus !== status || reminderCount !== prevReminderCount) {
       const publish = t.publish || {};
-      const shouldPrompt = status === 'success' && (t.dod || {}).pass && !publish.ok;
-      const timeoutPrompt = reminderCount > 0
-        && (String(prevStatusKey).includes(`reminder_count=${reminderCount}`) === false)
-        ? (t.next_step_hint || '')
+      const shouldPrompt = status === 'success' && dodPassed(t.dod || {}) && !publish.ok;
+      const timeoutPrompt = emitReminder
+        ? (mode === MODE_INTERACTIVE
+          ? '任务 pending 超过3小时，建议检查日志并决定是否 cancel（将转为 stopped）'
+          : '任务运行超过3小时，建议检查日志并决定是否 cancel（将转为 stopped）')
         : '';
       changes.push({
         id: tid,
-        mode: normalizeMode(t.mode),
+        mode,
         repo: t.repo,
         worktree: t.worktree,
         tmux_session: t.tmux_session,
@@ -1267,6 +1243,52 @@ function cmdCheck(opts: AnyObj): void {
 
 function cmdList(): void {
   printJson({ ok: true, registry: GLOBAL_TASKS_DIR, tasks: loadTasks() });
+}
+
+function parseDodPayload(opts: AnyObj): AnyObj {
+  if (opts.resultFile) {
+    const p = path.resolve(String(opts.resultFile));
+    if (!fs.existsSync(p)) fail(`result file not found: ${p}`);
+    const data = loadJson<AnyObj | null>(p, null);
+    if (!data || typeof data !== 'object') fail(`invalid result file json: ${p}`);
+    return data;
+  }
+  const status = String(opts.status || '').toLowerCase();
+  if (!status) fail('update-dod requires --result-file <json> or --status <pass|fail>');
+  const payload: AnyObj = {
+    status,
+    result: {},
+  };
+  if (opts.result) {
+    try {
+      payload.result = JSON.parse(String(opts.result));
+    } catch {
+      fail('invalid --result JSON payload');
+    }
+  }
+  return payload;
+}
+
+function cmdUpdateDod(opts: AnyObj): void {
+  if (!opts.id) fail('update-dod requires --id');
+  const task = loadTaskById(String(opts.id));
+  if (!task) fail(`task not found: ${opts.id}`);
+  const payload = parseDodPayload(opts);
+  const status = String(payload.status || '').toLowerCase();
+  if (![DOD_PASS, DOD_FAIL].includes(status)) fail(`invalid dod status: ${status}`);
+  const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
+  task.dod = {
+    status,
+    result: {
+      ...result,
+      error: String((result || {}).error || ''),
+    },
+    required_tests: normalizeRequiredTests(task.required_tests),
+    updated_at: nowIso(),
+  };
+  task.updated_at = nowIso();
+  saveTask(task);
+  printJson({ ok: true, id: task.id, dod: task.dod });
 }
 
 function cmdStatus(opts: AnyObj): void {
@@ -1475,48 +1497,13 @@ function parseArgv(argv: string[]): AnyObj {
       opts[key] = true;
       i += 1;
     } else {
-      opts[key] = next;
+      if (opts[key] === undefined) opts[key] = next;
+      else if (Array.isArray(opts[key])) opts[key].push(next);
+      else opts[key] = [opts[key], next];
       i += 2;
     }
   }
   return opts;
-}
-
-function numOrDefault(v: any, d: number): number {
-  const n = Number.parseInt(String(v ?? ''), 10);
-  return Number.isNaN(n) ? d : n;
-}
-
-function addTimingDefaults(opts: AnyObj): AnyObj {
-  const idleWithout = numOrDefault(
-    opts.idleWithoutRunningMarkerSec ?? opts.idleQuietSec,
-    30,
-  );
-  const idleWith = numOrDefault(
-    opts.idleWithRunningMarkerSec ?? opts.autoCloseIdleSec,
-    300,
-  );
-  return {
-    ...opts,
-    idle_without_running_marker_sec: idleWithout,
-    idle_with_running_marker_sec: idleWith,
-    // Backward-compatible aliases for external callers reading old field names.
-    idle_quiet_sec: idleWithout,
-    auto_close_idle_sec: idleWith,
-  };
-}
-
-function addCloseDefaults(opts: AnyObj): AnyObj {
-  const modeRaw = String(opts.closeMode ?? opts.close_mode ?? 'graceful_then_kill').toLowerCase();
-  const closeMode = modeRaw === 'kill_only' ? 'kill_only' : 'graceful_then_kill';
-  return {
-    ...opts,
-    close_mode: closeMode,
-  };
-}
-
-function addRuntimeDefaults(opts: AnyObj): AnyObj {
-  return addCloseDefaults(addTimingDefaults(opts));
 }
 
 function showHelp(): void {
@@ -1531,6 +1518,7 @@ function showHelp(): void {
       '  cancel',
       '  check',
       '  status',
+      '  update-dod',
       '  publish',
       '  create-pr',
       '  list',
@@ -1541,12 +1529,13 @@ function showHelp(): void {
 
 function showCommandHelp(cmd: string): void {
   const lines: Record<string, string[]> = {
-    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude] [--name <name>]'],
-    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--mode interactive|batch] [--agent codex|claude] [--name <name>]'],
+    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
+    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
     attach: ['usage: swarm.ts attach --id <id> --message <text>'],
-    cancel: ['usage: swarm.ts cancel --id <id> [--force] [--reason <text>] [--close-mode graceful_then_kill|kill_only]'],
+    cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
     check: ['usage: swarm.ts check [--changes-only]'],
     status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
+    'update-dod': ['usage: swarm.ts update-dod --id <id> (--result-file <json> | --status pass|fail [--result <json>])'],
     publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
     'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
     list: ['usage: swarm.ts list'],
@@ -1575,6 +1564,7 @@ function main(): void {
         mode: optsRaw.mode,
         agent: optsRaw.agent,
         name: optsRaw.name,
+        requiredTest: optsRaw.requiredTest,
       });
       return;
     }
@@ -1588,6 +1578,7 @@ function main(): void {
         mode: optsRaw.mode,
         agent: optsRaw.agent,
         name: optsRaw.name,
+        requiredTest: optsRaw.requiredTest,
       });
       return;
     }
@@ -1598,26 +1589,30 @@ function main(): void {
     }
     if (cmd === 'cancel') {
       if (!optsRaw.id) fail('cancel requires --id');
-      const o = addCloseDefaults(optsRaw);
-      const force = optsRaw.force === undefined ? true : Boolean(optsRaw.force);
-      cmdCancel({ ...o, id: String(optsRaw.id), force, reason: optsRaw.reason });
+      cmdCancel({ id: String(optsRaw.id), reason: optsRaw.reason });
       return;
     }
     if (cmd === 'check') {
-      const o = addRuntimeDefaults(optsRaw);
-      cmdCheck({ ...o, changesOnly: Boolean(optsRaw.changesOnly) });
+      cmdCheck({ ...optsRaw, changesOnly: Boolean(optsRaw.changesOnly) });
       return;
     }
     if (cmd === 'status') {
-      const o = addRuntimeDefaults(optsRaw);
-      cmdStatus({ ...o, id: optsRaw.id, query: optsRaw.query });
+      cmdStatus({ ...optsRaw, id: optsRaw.id, query: optsRaw.query });
+      return;
+    }
+    if (cmd === 'update-dod') {
+      cmdUpdateDod({
+        id: optsRaw.id,
+        status: optsRaw.status,
+        result: optsRaw.result,
+        resultFile: optsRaw.resultFile,
+      });
       return;
     }
     if (cmd === 'publish') {
       if (!optsRaw.id) fail('publish requires --id');
-      const o = addRuntimeDefaults(optsRaw);
       cmdPublish({
-        ...o,
+        ...optsRaw,
         id: String(optsRaw.id),
         remote: String(optsRaw.remote || 'origin'),
         targetBranch: optsRaw.targetBranch,
@@ -1629,9 +1624,8 @@ function main(): void {
     }
     if (cmd === 'create-pr') {
       if (!optsRaw.id) fail('create-pr requires --id');
-      const o = addRuntimeDefaults(optsRaw);
       createPrTask({
-        ...o,
+        ...optsRaw,
         id: String(optsRaw.id),
         remote: String(optsRaw.remote || 'origin'),
         targetBranch: optsRaw.targetBranch,
