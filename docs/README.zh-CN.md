@@ -1,128 +1,220 @@
 # openclaw-agent-swarm
 
-用于 OpenClaw 的统一任务编排 skill，基于 `git worktree + tmux` 运行多个隔离的 coding agent 任务。
+[English](../README.md) | 简体中文
 
-当前仓库只保留一个实现，同时支持两种任务模式：
-- `interactive`：长驻 tmux 会话，可 `attach`
-- `batch`：非交互执行，不支持 `attach`
+一个用于 OpenClaw 的多 Agent 编排 Skill：
+- 用统一运行时管理 `codex` 和 `claude` 任务
+- 每个任务独立 `git worktree + tmux session`
+- 同时支持 `interactive` 与 `batch` 两种模式
+- 支持运行中交互任务补充指令
+- 通过 heartbeat 轮询增量状态
+- 支持内置 DoD 与 `dod.md` 自定义完成定义
 
-英文主文档见 [README.md](../README.md)。
+本仓库现在只提供一个 skill：
+- `openclaw-agent-swarm`
 
-## 架构
+两种模式都通过同一个入口实现：
+- `interactive`：长驻 tmux，会话中可 `attach`
+- `batch`：非交互执行，不支持中途 `attach`
 
-现在两种模式走的是同一套任务模型、状态文件和收敛流程，差别只在于 agent 会话是否长期存活，以及是否允许 `attach`。
+## 0. 术语说明
+
+`DoD` 是 `Definition of Done`，即任务被认定为真正完成必须满足的客观标准。
+
+本项目支持两层 DoD：
+- `swarm.ts` 内置默认 DoD
+- 通过 `dod.md` 定义的任务级自定义 DoD，并用 `update-dod` 回写结果
+
+任务状态固定为：
+- `running`
+- `pending`
+- `success`
+- `failed`
+- `stopped`
+
+## 1. 项目目标
+
+当 OpenClaw 需要异步推进一个或多个工程任务时，这个 skill 提供一个可控、可追踪、可回写状态的执行层。
+
+核心设计目标：
+- 异步：`spawn` 立即返回，不阻塞主对话
+- 隔离：一个任务对应一个 worktree、branch、tmux session
+- 统一：同一套运行时同时支持 `interactive` 和 `batch`
+- 可干预：交互任务运行中可通过 `attach` 追加要求
+- 可巡检：`check --changes-only` 只回报变化
+- 可扩展：命令级强校验由 `required_tests` 负责，语义级验收由 `dod.md` 负责
+
+## 2. 系统架构
 
 ```mermaid
-flowchart TD
-    A[OpenClaw 或 CLI] --> B[swarm.js spawn]
-    B --> C[创建或复用 git worktree]
-    C --> D[启动 tmux session]
-    D --> E[写入 task.json 与 prompt/log 路径]
-    E --> F{mode}
-    F -->|batch| G[agent 运行到结束]
-    F -->|interactive| H[session 保持存活，支持 attach]
-    G --> I[check-agents.sh 或 swarm check]
-    H --> I
-    I --> J[updateStatus 刷新 task.json]
-    J --> K{是否终态}
-    K -->|否| L[仅返回变化状态]
-    K -->|是| M[执行默认 DoD 检查]
-    M --> N[按 dod.md 结果调用 update-dod 回写]
-    N --> O[publish 或 create-pr]
+flowchart LR
+    U[用户] --> OC[OpenClaw 主 Agent]
+    OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/scripts/swarm.js]
+
+    S --> T1[tmux session A]
+    S --> T2[tmux session B]
+    S --> T3[tmux session N]
+
+    T1 --> A1[Codex 或 Claude]
+    T2 --> A2[Codex 或 Claude]
+    T3 --> A3[Codex 或 Claude]
+
+    A1 --> W1[git worktree A]
+    A2 --> W2[git worktree B]
+    A3 --> W3[git worktree N]
+
+    S --> R[(~/.agents/agent-swarm/tasks/*.json)]
+    S --> L[(logs / prompts / exit files)]
+
+    HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
+    CK --> S
+    S --> R
 ```
 
-## DoD 自定义能力
+## 3. 端到端流程
 
-`agent-swarm` 现在支持两层 DoD：
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant OpenClaw
+    participant Swarm as swarm.js
+    participant Tmux
+    participant Agent as Codex 或 Claude
+    participant Registry as task registry
 
-- `swarm.ts` 内置默认 DoD
-- 通过 `dod.md` 定义的任务级自定义 DoD
+    User->>OpenClaw: "创建任务 A/B"
+    OpenClaw->>Swarm: spawn --repo ... --task ... --mode ...
+    Swarm->>Swarm: 创建 worktree + branch
+    Swarm->>Tmux: 为每个任务启动 new-session
+    Tmux->>Agent: 启动 CLI
+    Swarm->>Registry: 写入 task.json
+    Swarm-->>OpenClaw: 返回 task id/session/worktree
+    OpenClaw-->>User: 立即异步响应
 
-默认 DoD 的硬规则：
+    loop 每次 heartbeat
+        OpenClaw->>Swarm: check --changes-only
+        Swarm->>Registry: 刷新变化状态
+        Swarm-->>OpenClaw: 只返回 changed tasks
+    end
 
+    User->>OpenClaw: "给任务 A 补充要求"
+    OpenClaw->>Swarm: attach --id A --message ...
+    Swarm->>Tmux: 向 live session 发送文本
+
+    User->>OpenClaw: "校验 dod.md"
+    OpenClaw->>Swarm: update-dod --id A --result-file ...
+
+    User->>OpenClaw: "继续任务 A"
+    OpenClaw->>Swarm: spawn-followup --from A --worktree-mode new|reuse
+```
+
+## 4. 目录结构
+
+```text
+.
+├── code/                                # 源码目录
+│   ├── src/swarm.ts                     # TypeScript 主实现
+│   ├── package.json                     # 构建工具链
+│   └── tsconfig.json
+├── scripts/
+│   ├── build-skill.sh                   # 构建并同步运行产物
+│   ├── regression-swarm-concurrency.sh  # 运行时回归脚本
+│   └── README.md
+├── skills/openclaw-agent-swarm/         # 可直接分发的 skill 目录
+│   ├── SKILL.md
+│   ├── scripts/swarm.js
+│   ├── scripts/check-agents.sh
+│   └── references/
+│       ├── dod.md
+│       └── state-format.md
+├── docs/
+│   └── README.zh-CN.md
+└── legacy/                              # 重构前代码和旧文档保留区
+```
+
+构建流向：
+- `code/src/swarm.ts` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+
+## 5. 核心能力与设计细节
+
+### 5.1 任务模型
+
+任务存储在：
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
+
+关键字段：
+- `id`, `mode`, `agent`, `status`
+- `repo`, `worktree`, `branch`, `base_branch`
+- `tmux_session`
+- `task`, `parent_task_id`
+- `required_tests`
+- `created_at`, `updated_at`, `last_activity_at`, `timeout_since`
+- `log`, `exit_file`, `exit_code`, `result_excerpt`
+- `dod`, `publish`, `pr`, `cancel`
+
+### 5.2 状态机
+
+状态包括：
+- `running`
+- `pending`
+- `success`
+- `failed`
+- `stopped`
+
+判定原则：
+- `batch` 主要依据 exit file 与 tmux 存活状态收敛
+- `interactive` 在 session 存活期间保持可 `attach`
+- 终态任务在刷新时会重新执行默认 DoD 检查
+- `check --changes-only` 基于 `last-check.json` 做增量返回
+
+### 5.3 DoD
+
+默认 DoD 通过条件：
 - 任务状态必须是终态
 - worktree 必须 clean
 - `required_tests` 中每条命令都必须返回 `0`
 
-自定义 DoD 的推荐流程：
-
-1. 在任务上下文中维护 `dod.md`
-2. 任务终态后，由 OpenClaw 或外部流程读取 `dod.md`
-3. 执行额外语义校验
-4. 通过 `update-dod` 把结果回写进任务状态
-
-`dod.md` 示例：
-
-```md
-# DoD
-
-- `/healthz` 返回 200
-- `npm test` 通过
-- `README.md` 已补充新安装步骤
-```
-
-回写示例：
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" update-dod \
-  --id <task-id> \
-  --status pass \
-  --result '{"summary":"dod.md 检查通过","error":""}'
-```
+自定义 DoD 流程：
+- 在任务上下文中维护 `dod.md`
+- 任务结束后读取并校验 `dod.md`
+- 用 `update-dod` 写回 `pass|fail`
 
 约定：
-
 - `dod.status` 只有 `pass|fail`
 - 系统异常统一写入 `dod.result.error`
-- `required_tests` 是 `spawn` 时传入的命令级强规则
 
-## 环境要求
+### 5.4 Follow-up 与 worktree 复用
 
-- macOS 或 Linux
-- Node.js `>= 18`
-- `git`
-- `tmux`
-- 至少安装一个 agent CLI，并且在 `PATH` 中可用
-- 当前支持：`codex`、`claude`
+当已结束任务需要继续推进时：
+- 不直接 `attach`
+- 返回 follow-up 选择
+- 用户可以选择：
+  - `new`：新建 worktree 和 branch
+  - `reuse`：在守卫通过时复用旧 worktree
 
-目标目录必须已经是 git 仓库，否则 `agent-swarm` 会拒绝执行。
+`reuse` 守卫条件：
+- worktree 仍存在且是 git worktree
+- worktree clean
+- 父 tmux session 不在运行
+- 分支仍可解析
 
-## 安装
+## 6. 快速开始
 
-从 GitHub 克隆：
+安装 skill：
 
 ```bash
 git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
 cd openclaw-agent-swarm-skills
-```
-
-安装构建依赖：
-
-```bash
 cd code
 npm install
 cd ..
-```
-
-构建运行产物：
-
-```bash
 ./scripts/build-skill.sh
-```
-
-把生成后的 skill 安装到 OpenClaw 目录：
-
-```bash
 mkdir -p "$HOME/.openclaw/skills"
 rm -rf "$HOME/.openclaw/skills/openclaw-agent-swarm"
 cp -R skills/openclaw-agent-swarm "$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
-## 快速开始
-
-如果你只想先安装并跑起一个任务，可以直接走这条最短路径。
-
-先设置安装后的 skill 根目录：
+设置 skill 根目录：
 
 ```bash
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
@@ -139,13 +231,13 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --required-test "npm test"
 ```
 
-查看任务状态：
+查看进度：
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
 ```
 
-如果任务使用了 `dod.md`，在校验完成后回写 DoD 结果：
+如果任务使用了 `dod.md`，回写 DoD 结果：
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
@@ -160,27 +252,9 @@ node "$SKILL_ROOT/scripts/swarm.js" update-dod \
 node "$SKILL_ROOT/scripts/swarm.js" publish --id <task-id> --auto-pr
 ```
 
-## 运行目录
+## 7. 命令接口
 
-生成的 skill 目录：
-
-- `skills/openclaw-agent-swarm/SKILL.md`
-- `skills/openclaw-agent-swarm/scripts/swarm.js`
-- `skills/openclaw-agent-swarm/scripts/check-agents.sh`
-
-本地运行时状态目录：
-
-- `~/.agents/agent-swarm/tasks/<task-id>.json`
-- `~/.agents/agent-swarm/tasks/history/<yyyy-mm-dd>/<task-id>.json`
-- `~/.agents/agent-swarm/logs/<task-id>.log`
-- `~/.agents/agent-swarm/logs/<task-id>.exit`
-- `~/.agents/agent-swarm/prompts/<task-id>.txt`
-- `~/.agents/agent-swarm/worktree/<repo-name>/<task-id>/`
-- `~/.agents/agent-swarm/agent-swarm-last-check.json`
-
-## 命令用法
-
-先设置安装后的 skill 根目录：
+设置 skill 根目录：
 
 ```bash
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
@@ -189,27 +263,21 @@ SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 主入口：
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" <command> ...
+node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 ```
 
 `spawn`
 
-`spawn` 用于新建任务并创建新 worktree，是 `batch` 和 `interactive` 的统一入口。
-
-创建 batch 任务：
+`spawn` 用于在新 worktree 中创建任务，是 `batch` 和 `interactive` 的统一入口。
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --mode batch \
-  --task "实现功能 X" \
+  --task "实现模板复用功能" \
   --agent codex \
   --required-test "npm test"
 ```
-
-如果任务必须满足命令级校验，再让 DoD 通过，就使用 `--required-test`。
-
-创建 interactive 任务：
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
@@ -221,45 +289,45 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn \
 
 `attach`
 
-`attach` 只用于还在运行中的 `interactive` 任务，用来向当前 tmux 会话补充要求。
-
-给运行中的 interactive 任务补充要求：
+`attach` 只适用于仍在运行的 `interactive` 任务。
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" attach \
   --id <task-id> \
-  --message "先收敛 API 层，不处理 UI"
+  --message "先做 API 层"
 ```
 
 `spawn-followup`
 
-`spawn-followup` 用于在旧任务已经结束后继续派生新任务。`new` 表示新 worktree，`reuse` 表示在守卫通过时复用旧 worktree。
-
-对已结束任务创建 follow-up：
+`spawn-followup` 用于从已结束任务继续派生新任务。
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from <task-id> \
-  --worktree-mode new \
-  --task "根据 review 意见继续修改"
+  --task "根据 review 意见继续修改" \
+  --worktree-mode new
+```
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
+  --from <task-id> \
+  --task "继续在原分支上修改" \
+  --worktree-mode reuse
 ```
 
 `status` 与 `check`
 
-`status` 适合单任务查询，`check --changes-only` 适合轮询、heartbeat 或增量更新。
-
-检查状态：
+`status` 适合查单个任务，`check --changes-only` 适合轮询与 heartbeat。
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
+node "$SKILL_ROOT/scripts/swarm.js" status --query keyword
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```
 
 `update-dod`
 
-`update-dod` 用于在 `dod.md` 的自定义校验完成后，把语义级结果写回任务状态。
-
-更新 DoD：
+`update-dod` 用于在 `dod.md` 自定义校验完成后回写结果。
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
@@ -271,33 +339,73 @@ node "$SKILL_ROOT/scripts/swarm.js" update-dod \
 
 `cancel` 用于手动停止运行中的任务，并让它收敛到 `stopped`。
 
-取消任务：
-
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" cancel --id <task-id> --reason "手动停止"
+node "$SKILL_ROOT/scripts/swarm.js" cancel \
+  --id <task-id> \
+  --reason "手动停止"
 ```
 
 `publish` 与 `create-pr`
 
-`publish` 用于在任务完成且 DoD 通过后推送分支。`create-pr` 用于显式创建 PR，而不是直接用 `publish --auto-pr`。
-
-发布或创建 PR：
+任务结束且 DoD 通过后，使用 `publish` 推送分支；如果要显式创建 PR，则使用 `create-pr`。
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish --id <task-id> --auto-pr
-node "$SKILL_ROOT/scripts/swarm.js" create-pr --id <task-id>
+node "$SKILL_ROOT/scripts/swarm.js" publish \
+  --id <task-id> \
+  --auto-pr
 ```
 
-## OpenClaw 集成
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" create-pr \
+  --id <task-id>
+```
 
-如果你需要周期性收敛任务状态，请在 OpenClaw heartbeat 中调用 skill 内脚本：
+## 8. Heartbeat 集成
+
+在 OpenClaw 的 heartbeat 中配置以下命令：
 
 ```bash
 bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 ```
 
-这个脚本使用 `flock` 保证同一时刻只运行一个检查周期。
+这个 wrapper 使用 `flock`，保证同一时刻只有一个检查周期在运行。
 
-## Star History
+推荐用法：
+- 由 OpenClaw heartbeat 周期调用
+- 配合 `check --changes-only` 做增量状态上报
+
+## 9. OpenClaw 自然语言映射建议
+
+推荐映射：
+- “并发创建任务” -> `spawn`
+- “查看进度” -> `status`
+- “给这个任务补充要求” -> `attach`
+- “取消这个任务” -> `cancel --id`
+- “继续这个已结束任务” -> `spawn-followup`
+- “检查最近变化” -> `check --changes-only`
+- “发布这个完成任务” -> `publish --auto-pr`
+- “给这个任务创建 PR” -> `create-pr`
+
+当前支持在对话里显式指定 agent：
+- “这个任务用 codex” -> `spawn --agent codex`
+- “这个任务用 claude” -> `spawn --agent claude`
+
+## 10. 运行依赖
+
+- macOS 或 Linux
+- Node.js `>= 18`
+- `git`
+- `tmux`
+- `codex` 或 `claude` 至少一个
+
+目标路径必须已经是 git 仓库。
+
+## 11. 安全与运维注意事项
+
+- 运行时设计面向可信的本地开发环境。
+- 后台任务日志可能包含代码和上下文，请自行制定保留与清理策略。
+- `skills/` 下生成的 `.js` 文件属于运行产物，不应直接手改。
+
+## 12. Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=youzaiAGI/openclaw-agent-swarm-skills&type=Date)](https://www.star-history.com/#youzaiAGI/openclaw-agent-swarm-skills&Date)

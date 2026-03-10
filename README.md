@@ -1,134 +1,226 @@
 # openclaw-agent-swarm
 
-Unified OpenClaw skill for running coding agents in isolated `git worktree + tmux` tasks.
+English | [简体中文](docs/README.zh-CN.md)
 
-This repository now ships a single implementation that supports both task modes:
+An OpenClaw skill for orchestrating coding agents with one unified runtime:
+- run `codex` and `claude` tasks in isolated `git worktree + tmux` environments
+- support both `interactive` and `batch` task modes in the same skill
+- attach new instructions to a running interactive task
+- track incremental status through heartbeat polling
+- continue finished tasks through guarded follow-up flows
+- support built-in DoD plus custom `dod.md` checks
+
+This repository now ships a single skill:
+- `openclaw-agent-swarm`
+
+Both task modes are implemented by the same `swarm.js` entrypoint:
 - `interactive`: long-lived tmux session, supports `attach`
-- `batch`: non-interactive agent run inside tmux, no `attach`
+- `batch`: non-interactive run in tmux, no mid-task `attach`
 
-Chinese documentation is available at [docs/README.zh-CN.md](docs/README.zh-CN.md).
+## 0. Terminology
 
-## Architecture
+`DoD` means `Definition of Done`: the objective completion criteria a task must satisfy before it is considered complete.
 
-Both task modes now use the same task model, storage layout, and status convergence loop. The main difference is only how the agent session is driven and whether `attach` is allowed.
+This project supports two DoD layers:
+- built-in DoD enforced by `swarm.ts`
+- task-specific DoD defined in `dod.md` and written back through `update-dod`
+
+Task states are fixed:
+- `running`
+- `pending`
+- `success`
+- `failed`
+- `stopped`
+
+## 1. Goal
+
+When OpenClaw needs to drive one or more engineering tasks asynchronously, this skill provides a controllable execution layer with isolation, visibility, and explicit task state.
+
+Design goals:
+- Async by default: `spawn` returns immediately
+- Isolation: one task, one worktree, one branch, one tmux session
+- Unified runtime: one skill handles both `interactive` and `batch`
+- Human-in-the-loop: add instructions with `attach` when interactive work is still running
+- Deterministic monitoring: `check --changes-only` reports only changed tasks
+- Extensible completion: built-in checks handle command-level gates, `dod.md` handles semantic acceptance
+
+## 2. Architecture
 
 ```mermaid
-flowchart TD
-    A[OpenClaw or CLI] --> B[swarm.js spawn]
-    B --> C[Create or reuse git worktree]
-    C --> D[Start tmux session]
-    D --> E[Write task.json and prompt/log paths]
-    E --> F{mode}
-    F -->|batch| G[Run agent to completion]
-    F -->|interactive| H[Keep session alive for attach]
-    G --> I[check-agents.sh or swarm check]
-    H --> I
-    I --> J[updateStatus and refresh task.json]
-    J --> K{terminal?}
-    K -->|no| L[Return status changes only]
-    K -->|yes| M[Evaluate default DoD]
-    M --> N[Optional update-dod from dod.md checks]
-    N --> O[publish or create-pr]
+flowchart LR
+    U[User] --> OC[OpenClaw Main Agent]
+    OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/scripts/swarm.js]
+
+    S --> T1[tmux session A]
+    S --> T2[tmux session B]
+    S --> T3[tmux session N]
+
+    T1 --> A1[Codex or Claude]
+    T2 --> A2[Codex or Claude]
+    T3 --> A3[Codex or Claude]
+
+    A1 --> W1[git worktree A]
+    A2 --> W2[git worktree B]
+    A3 --> W3[git worktree N]
+
+    S --> R[(~/.agents/agent-swarm/tasks/*.json)]
+    S --> L[(logs / prompts / exit files)]
+
+    HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
+    CK --> S
+    S --> R
 ```
 
-## DoD
+## 3. End-to-End Flow
 
-`agent-swarm` supports two DoD layers:
+```mermaid
+sequenceDiagram
+    participant User
+    participant OpenClaw
+    participant Swarm as swarm.js
+    participant Tmux
+    participant Agent as Codex or Claude
+    participant Registry as task registry
 
-- Default built-in DoD enforced by `swarm.ts`
-- Custom task-specific DoD defined in `dod.md` and written back through `update-dod`
+    User->>OpenClaw: "Create task A/B"
+    OpenClaw->>Swarm: spawn --repo ... --task ... --mode ...
+    Swarm->>Swarm: create worktree + branch
+    Swarm->>Tmux: new-session per task
+    Tmux->>Agent: start CLI
+    Swarm->>Registry: write task.json
+    Swarm-->>OpenClaw: return task id/session/worktree
+    OpenClaw-->>User: immediate async response
 
-Default built-in DoD checks:
+    loop heartbeat tick
+        OpenClaw->>Swarm: check --changes-only
+        Swarm->>Registry: refresh changed states
+        Swarm-->>OpenClaw: changed tasks only
+    end
 
-- task status must be terminal
-- worktree must be clean
-- every command in `required_tests` must exit `0`
+    User->>OpenClaw: "Add instruction to task A"
+    OpenClaw->>Swarm: attach --id A --message ...
+    Swarm->>Tmux: send text into live session
+
+    User->>OpenClaw: "Validate dod.md"
+    OpenClaw->>Swarm: update-dod --id A --result-file ...
+
+    User->>OpenClaw: "Continue task A"
+    OpenClaw->>Swarm: spawn-followup --from A --worktree-mode new|reuse
+```
+
+## 4. Repository Layout
+
+```text
+.
+├── code/                                # source of truth
+│   ├── src/swarm.ts                     # TypeScript implementation
+│   ├── package.json                     # build toolchain
+│   └── tsconfig.json
+├── scripts/
+│   ├── build-skill.sh                   # build and sync runtime artifact
+│   ├── regression-swarm-concurrency.sh  # runtime regression script
+│   └── README.md
+├── skills/openclaw-agent-swarm/         # ship-ready skill payload
+│   ├── SKILL.md
+│   ├── scripts/swarm.js
+│   ├── scripts/check-agents.sh
+│   └── references/
+│       ├── dod.md
+│       └── state-format.md
+├── docs/
+│   └── README.zh-CN.md
+└── legacy/                              # old code and old docs kept for cleanup history
+```
+
+Build flow:
+- `code/src/swarm.ts` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
+
+## 5. Core Behavior
+
+### 5.1 Task Model
+
+Tasks are stored in:
+- `~/.agents/agent-swarm/tasks/<task_id>.json`
+
+Key fields:
+- `id`, `mode`, `agent`, `status`
+- `repo`, `worktree`, `branch`, `base_branch`
+- `tmux_session`
+- `task`, `parent_task_id`
+- `required_tests`
+- `created_at`, `updated_at`, `last_activity_at`, `timeout_since`
+- `log`, `exit_file`, `exit_code`, `result_excerpt`
+- `dod`, `publish`, `pr`, `cancel`
+
+### 5.2 State Machine
+
+States:
+- `running`
+- `pending`
+- `success`
+- `failed`
+- `stopped`
+
+Rules:
+- `batch` converges from exit file and tmux liveness
+- `interactive` remains attachable while the session is alive
+- terminal tasks are re-evaluated for default DoD on refresh
+- `check --changes-only` is incremental and backed by `last-check.json`
+
+### 5.3 DoD
+
+Built-in DoD passes only if:
+- task status is terminal
+- worktree is clean
+- every command in `required_tests` exits `0`
 
 Custom DoD flow:
+- define semantic acceptance in `dod.md`
+- validate it outside the task runtime
+- call `update-dod` to write back `pass|fail`
 
-1. Put the task-specific acceptance criteria in `dod.md`.
-2. Let OpenClaw or your own automation read `dod.md` after the task reaches terminal status.
-3. Run any additional semantic checks you need.
-4. Write the result back with `update-dod`.
+Conventions:
+- `dod.status` only allows `pass|fail`
+- system exceptions must be recorded in `dod.result.error`
 
-Example `dod.md`:
+### 5.4 Follow-up and Worktree Reuse
 
-```md
-# DoD
+For follow-up on finished tasks:
+- do not silently `attach`
+- return follow-up choices instead
+- user can choose:
+  - `new`: create a new worktree and branch
+  - `reuse`: continue on the existing worktree if the guard allows it
 
-- API endpoint `/healthz` returns `200`
-- `npm test` passes
-- `README.md` includes the new setup step
-```
+Reuse guard:
+- worktree exists and is still a git worktree
+- worktree is clean
+- parent tmux session is not alive
+- branch is still resolvable
 
-Example write-back:
+## 6. Quick Start
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" update-dod \
-  --id <task-id> \
-  --status pass \
-  --result '{"summary":"dod.md checks passed","error":""}'
-```
-
-DoD result conventions:
-
-- `dod.status` is only `pass` or `fail`
-- system exceptions are recorded in `dod.result.error`
-- `required_tests` is the command-level hard gate passed during `spawn`
-
-## Requirements
-
-- macOS or Linux
-- Node.js `>= 18`
-- `git`
-- `tmux`
-- At least one agent CLI installed and available in `PATH`
-- Supported agents: `codex`, `claude`
-
-The target repository must already be a valid git repository. `agent-swarm` refuses to run outside git worktrees.
-
-## Install
-
-Clone from GitHub:
+Install the skill:
 
 ```bash
 git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
 cd openclaw-agent-swarm-skills
-```
-
-Install build dependencies:
-
-```bash
 cd code
 npm install
 cd ..
-```
-
-Build the runtime artifact:
-
-```bash
 ./scripts/build-skill.sh
-```
-
-Install the generated skill into your OpenClaw skills directory:
-
-```bash
 mkdir -p "$HOME/.openclaw/skills"
 rm -rf "$HOME/.openclaw/skills/openclaw-agent-swarm"
 cp -R skills/openclaw-agent-swarm "$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
-## Quick Start
-
-Use this flow if you want to install the skill and start one task immediately.
-
-Set the installed skill root:
+Set skill root:
 
 ```bash
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
-Start a batch task with a hard test gate:
+Start one batch task:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
@@ -145,7 +237,7 @@ Check progress:
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
 ```
 
-If the task uses custom acceptance criteria in `dod.md`, write the result back after validation:
+If the task uses `dod.md`, write the result back:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
@@ -160,27 +252,9 @@ Publish the finished branch:
 node "$SKILL_ROOT/scripts/swarm.js" publish --id <task-id> --auto-pr
 ```
 
-## Runtime Layout
+## 7. Command Usage
 
-Generated skill payload:
-
-- `skills/openclaw-agent-swarm/SKILL.md`
-- `skills/openclaw-agent-swarm/scripts/swarm.js`
-- `skills/openclaw-agent-swarm/scripts/check-agents.sh`
-
-Runtime state on the local machine:
-
-- `~/.agents/agent-swarm/tasks/<task-id>.json`
-- `~/.agents/agent-swarm/tasks/history/<yyyy-mm-dd>/<task-id>.json`
-- `~/.agents/agent-swarm/logs/<task-id>.log`
-- `~/.agents/agent-swarm/logs/<task-id>.exit`
-- `~/.agents/agent-swarm/prompts/<task-id>.txt`
-- `~/.agents/agent-swarm/worktree/<repo-name>/<task-id>/`
-- `~/.agents/agent-swarm/agent-swarm-last-check.json`
-
-## Command Usage
-
-Set the installed skill root:
+Set skill root:
 
 ```bash
 SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
@@ -189,27 +263,21 @@ SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
 Main entrypoint:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" <command> ...
+node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 ```
 
 `spawn`
 
-Use `spawn` to create a new task with a fresh worktree. This is the normal entrypoint for both `batch` and `interactive`.
-
-Create a batch task:
+Use `spawn` to create a new task in a new worktree. This is the primary entrypoint for both `batch` and `interactive`.
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --mode batch \
-  --task "Implement feature X" \
+  --task "Implement custom template feature" \
   --agent codex \
   --required-test "npm test"
 ```
-
-Use `--required-test` when the task must satisfy command-level checks before DoD can pass.
-
-Create an interactive task:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn \
@@ -221,45 +289,45 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn \
 
 `attach`
 
-Use `attach` only for a running `interactive` task when you want to send more instructions into the live tmux session.
-
-Attach to a running interactive task:
+Use `attach` only for a running `interactive` task. It sends more instructions into the live tmux session.
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" attach \
   --id <task-id> \
-  --message "Narrow the scope to the API layer first"
+  --message "Prioritize the API layer first"
 ```
 
 `spawn-followup`
 
-Use `spawn-followup` after a previous task has already converged and you want to continue with a new task. `new` creates a new worktree, `reuse` keeps working in the previous one if the reuse guard allows it.
-
-Create a follow-up task from a terminal task:
+Use `spawn-followup` after a task has already converged and you want to continue from it.
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from <task-id> \
-  --worktree-mode new \
-  --task "Address review feedback"
+  --task "Address review feedback" \
+  --worktree-mode new
+```
+
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
+  --from <task-id> \
+  --task "Continue on the same branch" \
+  --worktree-mode reuse
 ```
 
 `status` and `check`
 
-Use `status` for one task and `check --changes-only` for periodic polling or heartbeat-driven incremental updates.
-
-Check status:
+Use `status` for one task lookup. Use `check --changes-only` for polling or heartbeat-driven updates.
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
+node "$SKILL_ROOT/scripts/swarm.js" status --query keyword
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```
 
 `update-dod`
 
-Use `update-dod` after your own `dod.md` validation has completed. This does not replace built-in checks; it adds task-specific semantic results.
-
-Update DoD:
+Use `update-dod` after your own `dod.md` validation finishes.
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
@@ -269,28 +337,32 @@ node "$SKILL_ROOT/scripts/swarm.js" update-dod \
 
 `cancel`
 
-Use `cancel` when you want to stop a running task and force it to converge to `stopped`.
-
-Cancel a task:
+Use `cancel` when you want to stop a running task and converge it to `stopped`.
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" cancel --id <task-id> --reason "manual stop"
+node "$SKILL_ROOT/scripts/swarm.js" cancel \
+  --id <task-id> \
+  --reason "manual stop"
 ```
 
 `publish` and `create-pr`
 
-Use `publish` after the task is done and DoD is satisfied. `create-pr` is the explicit PR creation step if you do not want `publish --auto-pr`.
-
-Publish or create a PR:
+Use `publish` after task completion and DoD pass. Use `create-pr` when you want explicit PR creation instead of `publish --auto-pr`.
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish --id <task-id> --auto-pr
-node "$SKILL_ROOT/scripts/swarm.js" create-pr --id <task-id>
+node "$SKILL_ROOT/scripts/swarm.js" publish \
+  --id <task-id> \
+  --auto-pr
 ```
 
-## OpenClaw Integration
+```bash
+node "$SKILL_ROOT/scripts/swarm.js" create-pr \
+  --id <task-id>
+```
 
-For periodic status convergence, configure OpenClaw heartbeat to call the skill-local wrapper:
+## 8. Heartbeat Integration
+
+Configure polling in OpenClaw heartbeat with the shipped wrapper:
 
 ```bash
 bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
@@ -298,10 +370,42 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 
 This wrapper uses `flock` so only one check cycle runs at a time.
 
-## License
+Recommended use:
+- run from OpenClaw heartbeat
+- use `check --changes-only` semantics for incremental reporting
 
-See [LICENSE](LICENSE).
+## 9. Natural Language Mapping
 
-## Star History
+Suggested intent mapping:
+- "Create tasks in parallel" -> `spawn`
+- "Check progress" -> `status`
+- "Add instruction to this task" -> `attach`
+- "Cancel this task" -> `cancel --id`
+- "Continue this finished task" -> `spawn-followup`
+- "Check changes only" -> `check --changes-only`
+- "Publish this finished task" -> `publish --auto-pr`
+- "Create PR for this task" -> `create-pr`
+
+Agent selection in chat is explicit:
+- "Use codex for this task" -> `spawn --agent codex`
+- "Use claude for this task" -> `spawn --agent claude`
+
+## 10. Requirements
+
+- macOS or Linux
+- Node.js `>= 18`
+- `git`
+- `tmux`
+- at least one of `codex` or `claude`
+
+The target path must already be a git repository.
+
+## 11. Safety Notes
+
+- The runtime is designed for trusted local development environments.
+- Background task logs may contain code and context; apply your own retention policy.
+- Generated `.js` files under `skills/` are runtime artifacts and should not be edited directly.
+
+## 12. Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=youzaiAGI/openclaw-agent-swarm-skills&type=Date)](https://www.star-history.com/#youzaiAGI/openclaw-agent-swarm-skills&Date)
