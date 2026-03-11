@@ -24,7 +24,7 @@ References:
 
 Dual track:
 - OpenClaw reads `dod.md` and runs markdown-defined checks.
-- `swarm.ts` enforces command checks from `required_tests` passed at spawn.
+- `scripts/swarm.js` enforces command checks from `required_tests` passed at spawn.
 
 Default DoD conditions:
 - task is terminal (`success|failed|stopped`)
@@ -47,14 +47,13 @@ DoD writeback:
 ## Commands
 
 ```bash
-SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
-node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
+node "scripts/swarm.js" <subcommand> ...
 ```
 
 Spawn:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn \
+node "scripts/swarm.js" spawn \
   --repo <git_repo_path> \
   --task "<task>" \
   [--mode interactive|batch] \
@@ -65,7 +64,7 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn \
 Spawn follow-up:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
+node "scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --task "<task>" \
   --worktree-mode new|reuse \
@@ -76,26 +75,26 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
 Attach:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" attach --id <task_id> --message "<message>"
+node "scripts/swarm.js" attach --id <task_id> --message "<message>"
 ```
 
 Cancel:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
+node "scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
 ```
 
 Check and status:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
-node "$SKILL_ROOT/scripts/swarm.js" status --id <task_id>
+node "scripts/swarm.js" check --changes-only
+node "scripts/swarm.js" status --id <task_id>
 ```
 
 Update DoD:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" update-dod \
+node "scripts/swarm.js" update-dod \
   --id <task_id> \
   --result-file <dod_result.json>
 ```
@@ -103,12 +102,12 @@ node "$SKILL_ROOT/scripts/swarm.js" update-dod \
 Publish and PR:
 
 ```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish --id <task_id> [--auto-pr]
-node "$SKILL_ROOT/scripts/swarm.js" create-pr --id <task_id>
+node "scripts/swarm.js" publish --id <task_id> [--auto-pr]
+node "scripts/swarm.js" create-pr --id <task_id>
 ```
 
 Heartbeat wrapper:
 
 ```bash
-bash "$SKILL_ROOT/scripts/check-agents.sh"
+bash "scripts/check-agents.sh"
 ```

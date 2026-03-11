@@ -15,7 +15,7 @@ These requirements should be mirrored into `required_tests` when they are comman
 
 ## 2. Command Checks
 
-`swarm.ts` supports strong command checks through repeated `--required-test` arguments at spawn.
+`scripts/swarm.js` supports strong command checks through repeated `--required-test` arguments at spawn.
 
 Example:
 
@@ -44,7 +44,7 @@ Default DoD does not require `success` and does not require commit count.
 OpenClaw updates DoD via:
 
 ```bash
-node swarm.js update-dod --id <task_id> --result-file <json>
+node swarm.js update-dod --id <task_id> --result-file <dod_result.json>
 ```
 
 Result JSON must include:
