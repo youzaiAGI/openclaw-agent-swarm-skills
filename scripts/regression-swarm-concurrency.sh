@@ -15,21 +15,15 @@ command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
 
-TIMEOUT_SEC="${1:-900}"
-CONCURRENCY="${2:-10}"
-POLL_SEC=15
+# policy knobs (script-side external timeout control)
+BATCH_RUNNING_KILL_SEC=180
+INTERACTIVE_LOG_QUIET_TO_PENDING_SEC=60
+INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC=180
+POLL_SEC=5
+
 PREFIX="regtest-$(date +%Y%m%d-%H%M%S)-$RANDOM"
 TMP_REPO="$(mktemp -d "/tmp/swarm-regrepo-XXXXXX")"
 TASKS_FILE="/tmp/${PREFIX}-cases.tsv"
-
-if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || (( TIMEOUT_SEC <= 0 )); then
-  echo "ERROR: timeout must be a positive integer (seconds), got: $TIMEOUT_SEC" >&2
-  exit 1
-fi
-if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || (( CONCURRENCY < 2 )); then
-  echo "ERROR: concurrency must be an integer >= 2 (to cover both codex and claude), got: $CONCURRENCY" >&2
-  exit 1
-fi
 
 cleanup() {
   rm -rf "$TMP_REPO"
@@ -39,63 +33,71 @@ trap cleanup EXIT
 
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
-echo "[INFO] timeout: ${TIMEOUT_SEC}s"
-echo "[INFO] concurrency(total tasks): $CONCURRENCY"
+echo "[INFO] workload: 8 tasks (codex/claude x batch/interactive x read/write)"
+echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
+echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require stopped"
+echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
 
 git -C "$TMP_REPO" init -q
 git -C "$TMP_REPO" config user.name "swarm-regression"
 git -C "$TMP_REPO" config user.email "swarm-regression@example.com"
-cat > "$TMP_REPO/README.md" <<'EOF'
+cat > "$TMP_REPO/README.md" <<'EOT'
 # swarm regression temp repo
-EOF
+EOT
 git -C "$TMP_REPO" add README.md
 git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
-codex_idx=0
-claude_idx=0
-for i in $(seq 1 "$CONCURRENCY"); do
-  if (( i % 2 == 1 )); then
-    agent="codex"
-    codex_idx=$((codex_idx + 1))
-    idx="$codex_idx"
+for agent in codex claude; do
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$agent" "batch" "ro" "-" "-" \
+    "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
+
+  if [[ "$agent" == "codex" ]]; then
+    batch_file="REG_BATCH_CDX.md"
+    batch_commit="test: codex batch write"
   else
-    agent="claude"
-    claude_idx=$((claude_idx + 1))
-    idx="$claude_idx"
+    batch_file="REG_BATCH_CLD.md"
+    batch_commit="test: claude batch write"
   fi
 
-  if (( idx % 2 == 1 )); then
-    kind="write"
-    if [[ "$agent" == "codex" ]]; then
-      expected_file="REG_CDX_${idx}.md"
-    else
-      expected_file="REG_CLD_${idx}.md"
-    fi
-    expected_msg="test: ${agent} regression write ${idx}"
-    task="写任务：在仓库根目录创建 ${expected_file}，写两行文本并提交 commit，提交信息为 \"${expected_msg}\"。"
-  else
-    kind="ro"
-    expected_file="-"
-    expected_msg="-"
-    task="只读任务：请列出当前仓库根目录文件名并给一句总结；不要修改任何文件。"
-  fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$agent" "$kind" "$idx" "$expected_file" "$expected_msg" "$task" >> "$TASKS_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$agent" "batch" "write" "$batch_file" "$batch_commit" \
+    "批处理写任务：在仓库根目录创建 ${batch_file}，写两行文本并提交 commit，提交信息为 \"${batch_commit}\"，完成后退出。" >> "$TASKS_FILE"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$agent" "interactive" "ro" "-" "-" \
+    "交互只读：列出仓库根目录文件并给一句总结；完成后保持会话等待，不要退出。" >> "$TASKS_FILE"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$agent" "interactive" "write" "-" "-" \
+    "交互写任务：在仓库根目录创建任意回归文件并提交 commit；完成后保持会话等待，不要退出。" >> "$TASKS_FILE"
 done
 
 declare -a TASK_IDS=()
+declare -a BATCH_IDS=()
+declare -a INTERACTIVE_IDS=()
 declare -a SPAWN_PIDS=()
-declare -a WRITE_CASES=()
+declare -a BATCH_WRITE_CASES=()
 
-while IFS=$'\t' read -r agent kind idx expected_file expected_msg task; do
-  task_id="${PREFIX}-${agent}-${kind}${idx}"
+i=0
+while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
+  i=$((i + 1))
+  task_id="${PREFIX}-${agent}-${mode}-${kind}"
   TASK_IDS+=("$task_id")
-  if [[ "$kind" == "write" ]]; then
-    WRITE_CASES+=("${task_id}|${expected_file}|${expected_msg}")
+  if [[ "$mode" == "batch" ]]; then
+    BATCH_IDS+=("$task_id")
+  else
+    INTERACTIVE_IDS+=("$task_id")
   fi
+  if [[ "$mode" == "batch" && "$kind" == "write" ]]; then
+    BATCH_WRITE_CASES+=("${task_id}|${expected_file}|${expected_msg}")
+  fi
+
   (
     node "$SWARM_JS" spawn \
       --repo "$TMP_REPO" \
+      --mode "$mode" \
       --agent "$agent" \
       --name "$task_id" \
       --task "$task" >/tmp/"${task_id}".spawn.out 2>/tmp/"${task_id}".spawn.err
@@ -109,7 +111,6 @@ for pid in "${SPAWN_PIDS[@]}"; do
     spawn_fail=1
   fi
 done
-
 if [[ "$spawn_fail" -ne 0 ]]; then
   echo "[ERROR] spawn phase failed"
   for id in "${TASK_IDS[@]}"; do
@@ -120,106 +121,85 @@ if [[ "$spawn_fail" -ne 0 ]]; then
   done
   exit 1
 fi
+
 echo "[INFO] spawn phase ok (${#TASK_IDS[@]} tasks)"
-echo "[INFO] tmux attach commands:"
+echo "[PROGRESS] phase=spawn"
 for id in "${TASK_IDS[@]}"; do
-  if [[ ! -f /tmp/"${id}".spawn.out ]]; then
-    echo "[ATTACH] $id :: (spawn output missing)"
-    continue
-  fi
-  session="$(SPAWN_JSON_PATH="/tmp/${id}.spawn.out" node -e '
-const fs = require("fs");
-const p = process.env.SPAWN_JSON_PATH || "";
-if (!p || !fs.existsSync(p)) process.exit(0);
-try {
-  const d = JSON.parse(fs.readFileSync(p, "utf8") || "{}");
-  process.stdout.write(String((d.task || {}).tmux_session || ""));
-} catch {}
-')"
-  if [[ -n "${session:-}" ]]; then
-    echo "[ATTACH] $id :: tmux attach -t $session"
-  else
-    echo "[ATTACH] $id :: (tmux session not found in spawn output)"
-  fi
+  echo "[PROGRESS][spawn] task=$id status=spawned"
 done
 
-start_ts="$(date +%s)"
-while true; do
-  now_ts="$(date +%s)"
-  elapsed=$((now_ts - start_ts))
-  if (( elapsed > TIMEOUT_SEC )); then
-    echo "[ERROR] timeout waiting tasks to converge (${TIMEOUT_SEC}s)"
-    break
-  fi
-
-  json="$(node "$SWARM_JS" check --json)"
-  summary="$(SUMMARY_INPUT_JSON="$json" IDS_CSV="$(IFS=,; echo "${TASK_IDS[*]}")" node -e '
-const data = JSON.parse(process.env.SUMMARY_INPUT_JSON || "{}");
-const ids = new Set((process.env.IDS_CSV || "").split(",").filter(Boolean));
-const terminals = new Set(["success", "failed", "stopped", "needs_human"]);
-let found = 0;
-let done = 0;
-const rows = [];
-for (const t of data.tasks || []) {
-  if (!ids.has(String(t.id || ""))) continue;
-  found++;
-  const status = String(t.status || "unknown");
-  if (terminals.has(status)) done++;
-  rows.push(`${t.id}:${status}`);
+status_of() {
+  local json="$1"
+  local id="$2"
+  STATUS_INPUT_JSON="$json" TARGET_ID="$id" node -e '
+const d = JSON.parse(process.env.STATUS_INPUT_JSON || "{}");
+const id = String(process.env.TARGET_ID || "");
+const t = (d.tasks || []).find(x => String(x.id || "") === id);
+process.stdout.write(String((t && t.status) || "missing"));
+'
 }
-console.log(JSON.stringify({ found, done, total: ids.size, rows }));
-')"
-  found="$(SUMMARY_JSON="$summary" node -e "const s=JSON.parse(process.env.SUMMARY_JSON); process.stdout.write(String(s.found));")"
-  done="$(SUMMARY_JSON="$summary" node -e "const s=JSON.parse(process.env.SUMMARY_JSON); process.stdout.write(String(s.done));")"
-  total="$(SUMMARY_JSON="$summary" node -e "const s=JSON.parse(process.env.SUMMARY_JSON); process.stdout.write(String(s.total));")"
-  rows="$(SUMMARY_JSON="$summary" node -e "const s=JSON.parse(process.env.SUMMARY_JSON); process.stdout.write(s.rows.join(' | '));")"
-  echo "[CHECK] +${elapsed}s  ${rows}"
 
-  if [[ "$found" -eq "$total" && "$done" -eq "$total" ]]; then
-    echo "[INFO] all tasks reached terminal status"
-    break
-  fi
-  sleep "$POLL_SEC"
-done
-
-if [[ "${done:-0}" -ne "${#TASK_IDS[@]}" ]]; then
-  echo "[ERROR] not all tasks converged"
-  exit 1
-fi
-
-# Print final converged reason for each task.
-IDS_CSV="$(IFS=,; echo "${TASK_IDS[*]}")" STATE_DIR="$STATE_DIR" node - <<'NODE'
-const fs = require('fs');
-const path = require('path');
-const ids = (process.env.IDS_CSV || '').split(',').filter(Boolean);
-const stateDir = process.env.STATE_DIR || '';
-for (const id of ids) {
-  const p = path.join(stateDir, `${encodeURIComponent(id)}.json`);
-  if (!fs.existsSync(p)) {
-    console.log(`[RESULT] ${id} status=missing converged_reason=missing_task_json`);
-    continue;
-  }
-  const t = JSON.parse(fs.readFileSync(p, 'utf8'));
-  const status = t.status || 'unknown';
-  const reason = t.converged_reason || 'unknown';
-  console.log(`[RESULT] ${id} status=${status} converged_reason=${reason}`);
+print_status_snapshot() {
+  local phase="$1"
+  local json="$2"
+  shift 2
+  for id in "$@"; do
+    local st
+    st="$(status_of "$json" "$id")"
+    echo "[PROGRESS][$phase] task=$id status=$st"
+  done
 }
-NODE
 
-# Validate every write task created file and commit.
+task_json_path() {
+  local task_id="$1"
+  local enc
+  enc="$(node -p "encodeURIComponent(process.argv[1])" "$task_id")"
+  printf '%s/%s.json' "$STATE_DIR" "$enc"
+}
+
+get_task_worktree() {
+  local task_id="$1"
+  local task_json
+  task_json="$(task_json_path "$task_id")"
+  if [[ ! -f "$task_json" ]]; then
+    return 1
+  fi
+  node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(t.worktree||''));" "$task_json"
+}
+
+get_task_log() {
+  local task_id="$1"
+  local task_json
+  task_json="$(task_json_path "$task_id")"
+  if [[ ! -f "$task_json" ]]; then
+    return 1
+  fi
+  node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(t.log||''));" "$task_json"
+}
+
+get_mtime() {
+  local p="$1"
+  if [[ -z "$p" || ! -e "$p" ]]; then
+    echo 0
+    return
+  fi
+  if stat -f %m "$p" >/dev/null 2>&1; then
+    stat -f %m "$p"
+    return
+  fi
+  if stat -c %Y "$p" >/dev/null 2>&1; then
+    stat -c %Y "$p"
+    return
+  fi
+  echo 0
+}
+
 validate_task_file_and_commit() {
   local task_id="$1"
   local expected_file="$2"
   local expected_msg="$3"
-  local task_id_encoded
-  task_id_encoded="$(node -p "encodeURIComponent(process.argv[1])" "$task_id")"
-  local task_json="$STATE_DIR/${task_id_encoded}.json"
-  if [[ ! -f "$task_json" ]]; then
-    echo "[ERROR] task json missing: $task_id"
-    return 1
-  fi
   local worktree
-  worktree="$(node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync('$task_json','utf8'));process.stdout.write(t.worktree||'');")"
+  worktree="$(get_task_worktree "$task_id" || true)"
   if [[ -z "$worktree" || ! -d "$worktree" ]]; then
     echo "[ERROR] worktree missing for $task_id"
     return 1
@@ -238,200 +218,237 @@ validate_task_file_and_commit() {
   return 0
 }
 
-wait_task_terminal() {
-  local task_id="$1"
-  local timeout_sec="${2:-300}"
-  local start_ts
-  start_ts="$(date +%s)"
-  while true; do
-    local now_ts
-    now_ts="$(date +%s)"
-    if (( now_ts - start_ts > timeout_sec )); then
-      echo "[ERROR] timeout waiting terminal status for task: $task_id"
-      return 1
-    fi
-    local status
-    status="$(node "$SWARM_JS" check --json | TARGET_TASK_ID="$task_id" node -e '
-const fs=require("fs");
-const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");
-const id=String(process.env.TARGET_TASK_ID||"");
-const t=(d.tasks||[]).find(x=>String(x.id||"")===id);
-process.stdout.write(String((t&&t.status)||"missing"));
-')"
-    if [[ "$status" == "success" || "$status" == "failed" || "$status" == "stopped" || "$status" == "needs_human" ]]; then
-      return 0
-    fi
-    sleep 5
-  done
-}
-
-write_fail=0
-for item in "${WRITE_CASES[@]}"; do
-  IFS='|' read -r task_id expected_file expected_msg <<< "$item"
-  if ! validate_task_file_and_commit "$task_id" "$expected_file" "$expected_msg"; then
-    write_fail=1
-  fi
-done
-
-if (( write_fail != 0 )); then
-  echo "[ERROR] write task verification failed (require all write tasks committed)"
-  exit 1
-fi
-
-run_attach_regression_case() {
-  local agent="$1"
-  local attach_task_id="${PREFIX}-${agent}-attach"
-  local spawn_task="请先输出 need your input，然后保持会话等待，不要自行退出。"
-  local attach_msg="补充要求：请确认已收到附加指令。"
-
-  node "$SWARM_JS" spawn \
-    --repo "$TMP_REPO" \
-    --agent "$agent" \
-    --name "$attach_task_id" \
-    --task "$spawn_task" >/tmp/"${attach_task_id}".spawn.out 2>/tmp/"${attach_task_id}".spawn.err
-
-  sleep 2
-
-  local attach_json
-  attach_json="$(node "$SWARM_JS" attach --id "$attach_task_id" --message "$attach_msg")"
-  local attach_sent
-  attach_sent="$(ATTACH_JSON="$attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
-  if [[ "$attach_sent" != "true" ]]; then
-    echo "[ERROR] attach expected sent=true for running task: $attach_task_id"
-    echo "[DEBUG] attach response: $attach_json"
+cancel_task() {
+  local id="$1"
+  local reason="$2"
+  local out
+  out="$(node "$SWARM_JS" cancel --id "$id" --reason "$reason")"
+  local ok
+  ok="$(CANCEL_JSON="$out" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const ok=(Boolean(d.cancelled)&&String(d.status||"")==="stopped")||Boolean(d.already_terminal);process.stdout.write(String(ok));')"
+  if [[ "$ok" != "true" ]]; then
+    echo "[ERROR] cancel failed for $id: $out"
     return 1
   fi
-
-  local cancel_json
-  cancel_json="$(node "$SWARM_JS" cancel --id "$attach_task_id" --force --reason "regression_cleanup_attach")"
-  local cancel_ok
-  cancel_ok="$(CANCEL_JSON="$cancel_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const ok=Boolean(d.cancelled)&&String(d.status||"")==="stopped"&&String(d.converged_reason||"").startsWith("user_cancelled:");process.stdout.write(String(ok));')"
-  if [[ "$cancel_ok" != "true" ]]; then
-    echo "[ERROR] cancel expected cancelled=true and status=stopped: $attach_task_id"
-    echo "[DEBUG] cancel response: $cancel_json"
-    return 1
-  fi
-
-  local cancel_again_json
-  cancel_again_json="$(node "$SWARM_JS" cancel --id "$attach_task_id" --reason "idempotent_check")"
-  local cancel_idempotent
-  cancel_idempotent="$(CANCEL_JSON="$cancel_again_json" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");process.stdout.write(String(Boolean(d.already_terminal)));')"
-  if [[ "$cancel_idempotent" != "true" ]]; then
-    echo "[ERROR] cancel expected already_terminal=true on second call: $attach_task_id"
-    echo "[DEBUG] cancel second response: $cancel_again_json"
-    return 1
-  fi
-
-  local attach_after_cancel_json
-  attach_after_cancel_json="$(node "$SWARM_JS" attach --id "$attach_task_id" --message "再次补充")"
-  local requires_confirmation
-  requires_confirmation="$(ATTACH_JSON="$attach_after_cancel_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.requires_confirmation)));')"
-  if [[ "$requires_confirmation" != "true" ]]; then
-    echo "[ERROR] attach expected requires_confirmation=true for non-running task: $attach_task_id"
-    echo "[DEBUG] attach response after cancel: $attach_after_cancel_json"
-    return 1
-  fi
-
-  # User rejects confirmation: do nothing and ensure no follow-up task is auto-created.
-  local followup_count_before
-  followup_count_before="$(node "$SWARM_JS" list | FOLLOW_PARENT_ID="$attach_task_id" node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");const c=(d.tasks||[]).filter(t=>String(t.parent_task_id||"")===String(process.env.FOLLOW_PARENT_ID||"")).length;process.stdout.write(String(c));')"
-  local followup_count_after_reject
-  followup_count_after_reject="$(node "$SWARM_JS" list | FOLLOW_PARENT_ID="$attach_task_id" node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0,"utf8")||"{}");const c=(d.tasks||[]).filter(t=>String(t.parent_task_id||"")===String(process.env.FOLLOW_PARENT_ID||"")).length;process.stdout.write(String(c));')"
-  if [[ "$followup_count_after_reject" != "$followup_count_before" ]]; then
-    echo "[ERROR] reject path should not create follow-up task automatically: $attach_task_id"
-    return 1
-  fi
-
-  # User agrees confirmation: create follow-up (new worktree) and verify commit.
-  local followup_task_id="${attach_task_id}-agree"
-  local followup_file="FOLLOWUP_NEW_${agent}.md"
-  local followup_commit="test: ${agent} followup new commit"
-  local followup_json
-  followup_json="$(node "$SWARM_JS" spawn-followup \
-    --from "$attach_task_id" \
-    --task "写任务：在仓库根目录创建 ${followup_file}，写两行文本并提交 commit，提交信息为 \"${followup_commit}\"。" \
-    --worktree-mode new \
-    --agent "$agent" \
-    --name "$followup_task_id")"
-  local followup_ok
-  followup_ok="$(FOLLOWUP_JSON="$followup_json" FOLLOWUP_TASK_ID="$followup_task_id" FOLLOW_PARENT_ID="$attach_task_id" node -e 'const d=JSON.parse(process.env.FOLLOWUP_JSON||"{}");const ok=Boolean(d.ok)&&String(d.parent_id||"")===String(process.env.FOLLOW_PARENT_ID||"")&&String((d.task||{}).id||"")===String(process.env.FOLLOWUP_TASK_ID||"");process.stdout.write(String(ok));')"
-  if [[ "$followup_ok" != "true" ]]; then
-    echo "[ERROR] agree path should create follow-up task: $attach_task_id"
-    echo "[DEBUG] follow-up response: $followup_json"
-    return 1
-  fi
-  if ! wait_task_terminal "$followup_task_id" 300; then
-    return 1
-  fi
-  if ! validate_task_file_and_commit "$followup_task_id" "$followup_file" "$followup_commit"; then
-    return 1
-  fi
-
-  # User agrees confirmation with reuse mode and verify same worktree + commit.
-  local followup_reuse_task_id="${attach_task_id}-agree-reuse"
-  local followup_reuse_file="FOLLOWUP_REUSE_${agent}.md"
-  local followup_reuse_commit="test: ${agent} followup reuse commit"
-  local followup_reuse_json
-  followup_reuse_json="$(node "$SWARM_JS" spawn-followup \
-    --from "$attach_task_id" \
-    --task "写任务：在仓库根目录创建 ${followup_reuse_file}，写两行文本并提交 commit，提交信息为 \"${followup_reuse_commit}\"。" \
-    --worktree-mode reuse \
-    --agent "$agent" \
-    --name "$followup_reuse_task_id")"
-  local followup_reuse_ok
-  followup_reuse_ok="$(FOLLOWUP_JSON="$followup_reuse_json" FOLLOWUP_TASK_ID="$followup_reuse_task_id" FOLLOW_PARENT_ID="$attach_task_id" node -e '
-const d = JSON.parse(process.env.FOLLOWUP_JSON || "{}");
-const t = d.task || {};
-const ok = Boolean(d.ok)
-  && String(d.parent_id || "") === String(process.env.FOLLOW_PARENT_ID || "")
-  && String(t.id || "") === String(process.env.FOLLOWUP_TASK_ID || "")
-  && String(t.worktree_mode || "") === "reuse";
-process.stdout.write(String(ok));
-')"
-  if [[ "$followup_reuse_ok" != "true" ]]; then
-    echo "[ERROR] agree path (reuse) should create follow-up task: $attach_task_id"
-    echo "[DEBUG] follow-up reuse response: $followup_reuse_json"
-    return 1
-  fi
-
-  local same_worktree
-  same_worktree="$(node "$SWARM_JS" list | FOLLOWUP_JSON="$followup_reuse_json" PARENT_TASK_ID="$attach_task_id" node -e '
-const fs = require("fs");
-const followup = JSON.parse(process.env.FOLLOWUP_JSON || "{}");
-const parentId = String(process.env.PARENT_TASK_ID || "");
-const list = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-const parent = (list.tasks || []).find((t) => String(t.id || "") === String(parentId));
-const childWt = String((followup.task || {}).worktree || "");
-const parentWt = String((parent || {}).worktree || "");
-process.stdout.write(String(Boolean(childWt && parentWt && childWt === parentWt)));
-')"
-  if [[ "$same_worktree" != "true" ]]; then
-    echo "[ERROR] reuse mode should reuse parent worktree: $attach_task_id"
-    echo "[DEBUG] follow-up reuse response: $followup_reuse_json"
-    return 1
-  fi
-
-  if ! wait_task_terminal "$followup_reuse_task_id" 300; then
-    return 1
-  fi
-  if ! validate_task_file_and_commit "$followup_reuse_task_id" "$followup_reuse_file" "$followup_reuse_commit"; then
-    return 1
-  fi
-
-  echo "[OK] attach+cancel+confirm(new+reuse) regression verified for $agent"
   return 0
 }
 
-attach_fail=0
-for agent in codex claude; do
-  if ! run_attach_regression_case "$agent"; then
-    attach_fail=1
+cancel_non_terminal_tasks() {
+  local json
+  json="$(node "$SWARM_JS" check --json)"
+  for id in "${TASK_IDS[@]}"; do
+    local st
+    st="$(status_of "$json" "$id")"
+    case "$st" in
+      success|failed|stopped)
+        ;;
+      *)
+        echo "[CLEANUP] cancel non-terminal task: $id (status=$st)"
+        cancel_task "$id" "regression_failure_cleanup" || true
+        ;;
+    esac
+  done
+}
+
+# 1) batch phase: must end in success; running >3min => cancel+FAIL
+batch_fail=0
+batch_pass_count=0
+batch_fail_count=0
+batch_start_ts="$(date +%s)"
+while true; do
+  json="$(node "$SWARM_JS" check --json)"
+  now_ts="$(date +%s)"
+  elapsed=$((now_ts - batch_start_ts))
+  all_done=1
+  row=""
+  for id in "${BATCH_IDS[@]}"; do
+    st="$(status_of "$json" "$id")"
+    row+="$id:$st | "
+    case "$st" in
+      success)
+        ;;
+      failed|stopped)
+        batch_fail=1
+        ;;
+      running|pending)
+        all_done=0
+        if (( elapsed >= BATCH_RUNNING_KILL_SEC )); then
+          echo "[WARN] batch over ${BATCH_RUNNING_KILL_SEC}s, cancel: $id"
+          cancel_task "$id" "batch_running_over_${BATCH_RUNNING_KILL_SEC}s" || true
+          batch_fail=1
+        fi
+        ;;
+      *)
+        all_done=0
+        ;;
+    esac
+  done
+  echo "[CHECK][batch] +${elapsed}s ${row% | }"
+  print_status_snapshot "batch" "$json" "${BATCH_IDS[@]}"
+
+  if [[ "$all_done" -eq 1 ]]; then
+    break
+  fi
+  if (( elapsed > BATCH_RUNNING_KILL_SEC + 120 )); then
+    echo "[ERROR] batch phase watchdog timeout"
+    batch_fail=1
+    break
+  fi
+  sleep "$POLL_SEC"
+done
+
+json_batch_final="$(node "$SWARM_JS" check --json)"
+for id in "${BATCH_IDS[@]}"; do
+  st="$(status_of "$json_batch_final" "$id")"
+  if [[ "$st" == "success" ]]; then
+    batch_pass_count=$((batch_pass_count + 1))
+  else
+    batch_fail_count=$((batch_fail_count + 1))
   fi
 done
 
-if (( attach_fail != 0 )); then
-  echo "[ERROR] attach/cancel regression failed"
-  exit 1
+for item in "${BATCH_WRITE_CASES[@]}"; do
+  IFS='|' read -r task_id expected_file expected_msg <<< "$item"
+  if ! validate_task_file_and_commit "$task_id" "$expected_file" "$expected_msg"; then
+    batch_fail=1
+  fi
+done
+
+if (( batch_fail != 0 )); then
+  echo "[ERROR] batch requirement failed: all batch tasks must be success"
 fi
 
-echo "[PASS] concurrency regression passed"
+# 2) interactive attach check
+interactive_fail=0
+interactive_pass_count=0
+interactive_fail_count=0
+declare -a INTERACTIVE_READY_IDS=()
+for id in "${INTERACTIVE_IDS[@]}"; do
+  attach_json="$(node "$SWARM_JS" attach --id "$id" --message "回归附加指令：请回复已收到并继续等待")"
+  attach_sent="$(ATTACH_JSON="$attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
+  if [[ "$attach_sent" != "true" ]]; then
+    echo "[ERROR] attach expected sent=true for running interactive task: $id"
+    echo "[DEBUG] attach response: $attach_json"
+    echo "[WARN] attach failed, cancel task to avoid leaked session: $id"
+    cancel_task "$id" "attach_failed_cleanup" || true
+    interactive_fail=1
+    interactive_fail_count=$((interactive_fail_count + 1))
+    continue
+  fi
+  echo "[OK] attach verified: $id"
+  INTERACTIVE_READY_IDS+=("$id")
+done
+
+# 3) interactive case pass criteria (script-side):
+#    - wait until log is quiet for 60s
+#    - then status must be pending
+#    - then cancel immediately
+#    - then status must become stopped
+
+wait_interactive_quiet_then_pending() {
+  local id="$1"
+  local logp="$2"
+  local last_mtime last_change now_ts quiet_sec elapsed json st
+  local start_ts
+  start_ts="$(date +%s)"
+  last_mtime="$(get_mtime "$logp")"
+  last_change="$start_ts"
+
+  while true; do
+    now_ts="$(date +%s)"
+    elapsed=$((now_ts - start_ts))
+    cur_mtime="$(get_mtime "$logp")"
+    if (( cur_mtime > last_mtime )); then
+      last_mtime="$cur_mtime"
+      last_change="$now_ts"
+    fi
+    quiet_sec=$((now_ts - last_change))
+
+    json="$(node "$SWARM_JS" check --json)"
+    st="$(status_of "$json" "$id")"
+    echo "[CHECK][interactive] $id status=$st quiet=${quiet_sec}s elapsed=${elapsed}s"
+
+    if (( quiet_sec >= INTERACTIVE_LOG_QUIET_TO_PENDING_SEC )); then
+      if [[ "$st" != "pending" ]]; then
+        echo "[ERROR] after log quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s, status must be pending: $id => $st"
+        cancel_task "$id" "interactive_not_pending_after_quiet" || true
+        return 1
+      fi
+      return 0
+    fi
+
+    if (( elapsed >= INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC )); then
+      echo "[WARN] interactive log continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s, cancel+FAIL: $id"
+      cancel_task "$id" "interactive_continuous_update_over_${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s" || true
+      return 1
+    fi
+
+    sleep "$POLL_SEC"
+  done
+}
+
+wait_task_stopped() {
+  local id="$1"
+  local timeout_sec="${2:-60}"
+  local start_ts now_ts elapsed json st
+  start_ts="$(date +%s)"
+  while true; do
+    now_ts="$(date +%s)"
+    elapsed=$((now_ts - start_ts))
+    json="$(node "$SWARM_JS" check --json)"
+    st="$(status_of "$json" "$id")"
+    if [[ "$st" == "stopped" ]]; then
+      return 0
+    fi
+    if (( elapsed >= timeout_sec )); then
+      echo "[ERROR] timeout waiting stopped: $id => $st"
+      cancel_task "$id" "interactive_timeout_wait_stopped" || true
+      return 1
+    fi
+    sleep "$POLL_SEC"
+  done
+}
+
+for id in "${INTERACTIVE_READY_IDS[@]}"; do
+  logp="$(get_task_log "$id" || true)"
+  if ! wait_interactive_quiet_then_pending "$id" "$logp"; then
+    interactive_fail=1
+    interactive_fail_count=$((interactive_fail_count + 1))
+    continue
+  fi
+  echo "[OK] pending verified after quiet window: $id"
+
+  if ! cancel_task "$id" "interactive_pending_verified_then_cancel"; then
+    interactive_fail=1
+    interactive_fail_count=$((interactive_fail_count + 1))
+    continue
+  fi
+  if ! wait_task_stopped "$id" 60; then
+    interactive_fail=1
+    interactive_fail_count=$((interactive_fail_count + 1))
+    continue
+  fi
+  echo "[OK] stopped verified after cancel: $id"
+  interactive_pass_count=$((interactive_pass_count + 1))
+done
+
+if (( interactive_fail != 0 )); then
+  echo "[ERROR] interactive requirement failed"
+fi
+
+total_pass=$((batch_pass_count + interactive_pass_count))
+total_fail=$((batch_fail_count + interactive_fail_count))
+echo "[SUMMARY] batch_pass=${batch_pass_count}/${#BATCH_IDS[@]} batch_fail=${batch_fail_count}/${#BATCH_IDS[@]}"
+echo "[SUMMARY] interactive_pass=${interactive_pass_count}/${#INTERACTIVE_IDS[@]} interactive_fail=${interactive_fail_count}/${#INTERACTIVE_IDS[@]}"
+echo "[SUMMARY] total_pass=${total_pass}/${#TASK_IDS[@]} total_fail=${total_fail}/${#TASK_IDS[@]}"
+json_end="$(node "$SWARM_JS" check --json)"
+for id in "${TASK_IDS[@]}"; do
+  st="$(status_of "$json_end" "$id")"
+  echo "[SUMMARY][CASE] task=$id final_status=$st"
+done
+
+if (( batch_fail != 0 || interactive_fail != 0 )); then
+  cancel_non_terminal_tasks
+  echo "[FAIL] regression failed"
+  exit 1
+fi
+echo "[PASS] regression passed (batch=success, interactive=stopped)"
