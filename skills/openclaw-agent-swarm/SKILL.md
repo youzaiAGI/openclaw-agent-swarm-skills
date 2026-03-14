@@ -23,7 +23,12 @@ References:
 - `references/dod.md`
 
 How to evaluate DoD:
-- Default DoD (from `swarm.ts`): task status must be `success` or `stopped`, and worktree must be clean.
+- Spawn/spawn-followup does not evaluate DoD; default `task.dod` is empty `{}`.
+- Interactive mode: evaluate default DoD only when task transitions to `stopped`.
+- Batch mode: evaluate default DoD only when task transitions to `success`.
+- Batch mode: if task transitions to `failed` or `stopped`, set DoD to failed directly.
+- Other `updateStatus` cases do not evaluate DoD.
+- Default DoD checks are: allowed terminal status + worktree clean.
 - Extra DoD method 1: put semantic acceptance rules in `references/dod.md` (for example: must push, must have new commits).
 - Extra DoD method 2: pass repeated `--required-test "<cmd>"` at `spawn`; all commands must exit with code `0`.
 - Each required test result is recorded in `task.dod.result.checks`.

@@ -22,7 +22,6 @@ const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SH
 const MODE_INTERACTIVE = 'interactive';
 const MODE_BATCH = 'batch';
 const TERMINAL_STATUSES = new Set(['success', 'failed', 'stopped']);
-const DEFAULT_DOD_ALLOWED_STATUSES = new Set(['success', 'stopped']);
 const INTERACTIVE_LOG_QUIET_SEC = 60;
 const BATCH_TIMEOUT_SEC = 10_800;
 const INTERACTIVE_PENDING_TIMEOUT_SEC = 10_800;
@@ -615,6 +614,7 @@ function dodPassed(dod: AnyObj): boolean {
 function evaluateDefaultDod(task: AnyObj): AnyObj {
   const worktree = String(task.worktree || '');
   const status = String(task.status || '');
+  const mode = normalizeMode(task.mode);
   const requiredTests = normalizeRequiredTests(task.required_tests);
   const result: AnyObj = {
     reason: '',
@@ -638,7 +638,9 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
     result.reason = `status_not_terminal:${status || 'unknown'}`;
     return dod;
   }
-  if (!DEFAULT_DOD_ALLOWED_STATUSES.has(status)) {
+  const statusAllowed = (mode === MODE_INTERACTIVE && status === 'stopped')
+    || (mode === MODE_BATCH && status === 'success');
+  if (!statusAllowed) {
     result.reason = `status_not_allowed_for_default_dod:${status || 'unknown'}`;
     return dod;
   }
@@ -676,6 +678,36 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
   dod.status = DOD_PASS;
   result.reason = 'ok';
   return dod;
+}
+
+function buildDodFailedByStatus(task: AnyObj, status: string): AnyObj {
+  return {
+    status: DOD_FAIL,
+    result: {
+      reason: `status_forced_fail:${status || 'unknown'}`,
+      error: '',
+      terminal: isTerminalStatus(status),
+      worktree_clean: false,
+      checks: [],
+    },
+    required_tests: normalizeRequiredTests(task.required_tests),
+    updated_at: nowIso(),
+  };
+}
+
+function applyDodOnStatusTransition(task: AnyObj, oldStatus: string, nextStatus: string, mode: TaskMode): void {
+  if (oldStatus === nextStatus) return;
+  if (mode === MODE_INTERACTIVE && nextStatus === 'stopped') {
+    task.dod = evaluateDefaultDod(task);
+    return;
+  }
+  if (mode === MODE_BATCH && nextStatus === 'success') {
+    task.dod = evaluateDefaultDod(task);
+    return;
+  }
+  if (mode === MODE_BATCH && (nextStatus === 'failed' || nextStatus === 'stopped')) {
+    task.dod = buildDodFailedByStatus(task, nextStatus);
+  }
 }
 
 function parseRemoteUrl(remoteUrl: string): AnyObj {
@@ -725,8 +757,7 @@ function buildManualPrUrl(forgeInfo: AnyObj, sourceBranch: string, targetBranch:
 
 function ensurePublishable(task: AnyObj): void {
   if (task.status !== 'success') fail(`task is not success: ${task.status}`);
-  const dod = task.dod || evaluateDefaultDod(task);
-  task.dod = dod;
+  const dod = task.dod && typeof task.dod === 'object' ? task.dod : {};
   if (!dodPassed(dod)) fail(`task DoD not pass: ${(dod.result || {}).reason || 'unknown'}`);
 }
 
@@ -816,7 +847,6 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   const now = new Date();
   const nowIsoStr = now.toISOString();
   if (isTerminalStatus(old)) {
-    task.dod = evaluateDefaultDod(task);
     return task;
   }
 
@@ -889,7 +919,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
     task.converged_at = nowIsoStr;
     if (convergedReason) task.converged_reason = convergedReason;
   }
-  task.dod = evaluateDefaultDod(task);
+  applyDodOnStatusTransition(task, old, next, mode);
   return task;
 }
 
@@ -987,7 +1017,7 @@ function cmdSpawn(opts: AnyObj): void {
   }
   const wtMeta = createWorktree(repo, taskId);
   const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, '', requiredTests);
-  task.dod = evaluateDefaultDod(task);
+  task.dod = {};
   saveTask(task);
   printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
 }
@@ -1028,7 +1058,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const parentId = parent.id || '';
   const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests);
   task.worktree_mode = opts.worktreeMode;
-  task.dod = evaluateDefaultDod(task);
+  task.dod = {};
   saveTask(task);
   printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
 }
@@ -1103,6 +1133,7 @@ function cmdCancel(opts: AnyObj): void {
   if (!task) fail(`task not found: ${opts.id}`);
 
   const status = String(task.status || 'unknown');
+  const mode = normalizeMode(task.mode);
   const session = String(task.tmux_session || '');
   const reason = String(opts.reason || '').trim();
   const now = nowIso();
@@ -1141,7 +1172,7 @@ function cmdCancel(opts: AnyObj): void {
     session_killed: killed,
     reason,
   };
-  task.dod = evaluateDefaultDod(task);
+  applyDodOnStatusTransition(task, status, 'stopped', mode);
   saveTask(task);
 
   printJson({
