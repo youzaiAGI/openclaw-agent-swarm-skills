@@ -27,26 +27,19 @@ Swarm 通过多层隔离机制确保 Agent 执行过程的安全与可控：
 
 ---
 
-## 🛠️ 快速上手
+## 🛠️ 快速安装
 
-### 环境要求
+本项目是为 AI Agent（如 Gemini CLI、OpenClaw）设计的 **Skill**。你只需向你的 Agent 提供以下提示词即可完成自动安装：
+
+> **“安装这个 skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills/tree/main/skills/openclaw-agent-swarm”**
+
+### 前置条件
+请确保本地环境已安装以下工具：
 - **操作系统**: macOS 或 Linux
 - **Node.js**: >= 18
 - **依赖工具**: `git`, `tmux`, 以及至少一个 Agent CLI (`codex`, `claude` 或 `gemini`)。
 
-### 安装步骤
-```bash
-# 克隆仓库
-git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
-cd openclaw-agent-swarm-skills
-
-# 从源码构建
-cd code && npm install && npm run build
-cd ..
-
-# 部署 Skill 产物
-./scripts/build-skill.sh
-```
+如果你需要手动构建或进行高级配置，请参考 [快速入门 (Getting Started)](getting-started.md) 指南。
 
 ---
 

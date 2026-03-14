@@ -27,26 +27,19 @@ The swarm ensures safe and controllable execution through multiple layers of iso
 
 ---
 
-## 🛠️ Quick Setup
+## 🛠️ Installation
+
+This project is a **Skill** designed for AI agents (e.g., Gemini CLI, OpenClaw). To install it, simply provide the following prompt to your agent:
+
+> **"Install this skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills/tree/main/skills/openclaw-agent-swarm"**
 
 ### Prerequisites
+Ensure your local environment has the following tools installed:
 - **OS**: macOS or Linux
 - **Node.js**: >= 18
 - **Dependencies**: `git`, `tmux`, and at least one agent CLI (`codex`, `claude`, or `gemini`).
 
-### Installation
-```bash
-# Clone the repository
-git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
-cd openclaw-agent-swarm-skills
-
-# Build from source
-cd code && npm install && npm run build
-cd ..
-
-# Deploy the skill payload
-./scripts/build-skill.sh
-```
+For manual deployment or advanced setup, see the [Getting Started](docs/getting-started.md) guide.
 
 ---
 
