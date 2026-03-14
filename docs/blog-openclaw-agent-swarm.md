@@ -1,172 +1,113 @@
-# 我为什么用 OpenClaw 调度 Codex / Claude：并发、低阻塞与更可控的工程流
+# 告别“代码拆家”：OpenClaw Agent Swarm，为 AI Agent 穿上“束缚衣”与“助推器”
 
-如果你已经在用 Codex 或 Claude 写代码，很容易遇到一个瓶颈：
 
-- 单会话虽然强，但串行；
-- 一边写代码一边和人交互，会被上下文不断打断；
-- 同时推进多个需求时，状态管理、结果回收、任务取消都很痛苦。
+## 第一部分：愿景反差——从“盲盒开发”到“工业级编排”
 
-我这段时间在用一个组合：**OpenClaw + openclaw-agent-swarm + Codex/Claude CLI**。核心思路很简单：
+以前，我们让 AI Agent 写代码，就像在开盲盒：你把需求丢给它，它在你的主目录里翻箱倒柜，改得面目全非，中途卡住了你只能干瞪眼，或者它写完了代码却跑不通。更糟糕的是，如果同时让多个 Agent 干活，你的本地 Git 仓库瞬间就会变成大型“拆家”现场。
 
-- `Codex / Claude` 专注做 coding；
-- `OpenClaw` 专注做人机交互与编排；
-- `swarm` 负责把每个任务放到独立 worktree + tmux session 里并发跑。
-
-这篇文章讲清楚 4 件事：
-
-1. 为什么这套分工比“单一大模型会话”更实用；
-2. 为什么在同类任务下，这样做通常更省 token；
-3. 我的真实使用场景（多仓库并发、中途补充、取消、异步状态回传）；
-4. 和 Claude Subagents / Agent Teams 的关键差异与边界。
+现在，**OpenClaw Agent Swarm** 改变了这种局面。它不再是一个简单的脚本，而是一个专为 AI Agent 设计的**统一执行层 (Unified Execution Layer)**。它能让你的 Codex、Claude Code 或 Gemini 在相互隔离、可监控、可干预的环境中异步工作。简单来说，它给 AI Agent 配了一个“项目经理”，不仅管住它的手（隔离），还盯着它的进度（监控），甚至允许你随时“查岗”并补充需求（交互）。
 
 ---
 
-## 1. 分工的优势：让专业 CLI 做专业的事
+## 第二部分：核心原理解析——它到底是个啥？
 
-在这个项目里，OpenClaw 不是去替代 Codex/Claude，而是做“调度层”。
+### 宏观定位：Agent 的“施工现场管理器”
+在技术栈中，OpenClaw Agent Swarm 位于**协调型 Agent (Coordinator Agent)** 与 **执行型 Agent (Agent CLI)** 之间。它取代了过去那种“直接在 PWD 目录下调用命令行”的原始方式。
 
-从实现上看，`openclaw-agent-swarm` 的几个关键点是：
+### 核心逻辑：绝妙的“工地”比喻
+如果把 AI Agent 比作专业的**分包商 (Sub-contractors)**，那么 OpenClaw Agent Swarm 就是**总承包商 (General Contractor)**。
+- **Git Worktree (工作树)** 就是为每个分包商开辟的**独立施工区**。分包商在里面怎么拆墙、垒砖，都不会影响到主楼（主代码库）。
+- **Tmux (终端复用器)** 则是施工区的**闭路监控与对讲系统**。即使你关掉电脑，施工仍在后台继续，你随时可以接入对讲机（Attach）下达新指令。
 
-- `spawn` 异步返回，不阻塞主会话；
-- 每个任务独立 `git worktree + branch + tmux session`；
-- 运行中可 `attach` 给单任务补充要求；
-- heartbeat 触发 `check --changes-only`，只回传有变化的任务；
-- 对结束任务走 follow-up（`new/reuse worktree`），避免脏续写。
-
-这意味着你得到的是一个“可并发、可干预、可回溯”的执行层，而不是把所有事情都塞进同一个上下文窗口里硬扛。
-
----
-
-## 2. 为什么同样需求下常常更省 token
-
-先给结论：**把 coding 子任务下沉到 Codex/Claude CLI，再由 OpenClaw 做轻交互与状态编排，通常更省主会话 token**。
-
-原因有三层：
-
-- 上下文隔离：每个任务在独立会话和独立工作目录内运行，主会话不必反复携带长代码上下文；
-- 增量回传：heartbeat 只返回状态变化和摘要，不需要每轮都重放完整执行过程；
-- 角色分离：OpenClaw 只处理“派单/改单/收单”，coding 细节在子 agent 内部消化。
-
-对比 Claude 官方文档里对 Agent Teams 的说明也能侧面印证：
-
-- Agent Teams 明确是“每个 teammate 各自上下文窗口”，并且官方直接提示 token 使用会随成员数上升；
-- 官方同时建议：串行任务、同文件冲突任务，用单会话或 subagents 更合适。
-
-所以我的经验是：
-
-- 需要多人并发式探索时，token 上升是可接受成本；
-- 需要日常工程推进时，把主会话做“控制面”，把执行面下沉到专用 coding CLI，性价比更高。
+### 价值兑现：解决“卡脖子”的隔离与可见性
+它解决了 Agent 落地中最棘手的两个问题：**状态不可控**和**环境污染**。通过异步化（Async by default），它让开发者从“等待 Agent 输出”的焦虑中解脱出来，转而通过心跳检查来管理任务。
 
 ---
 
-## 3. 我的真实场景：并发、多仓库、可插话、可取消、异步回传
+## 第三部分：手把手实操——让你的 Agent 跑起来
 
-### 场景 A：同时发起多个任务（一个仓库或多个仓库）
+要体验这套系统，你需要准备好 **Node.js >= 18**、**Git** 和 **Tmux**。
 
-我经常一次开 3~10 个任务：
+### 1. 环境准备与构建
+首先，我们需要从 TypeScript 源码编译出运行产物。
 
-- 同仓库不同模块并发；
-- 多仓库并发（比如后端仓库 + 前端仓库 + 工具仓库）。
+```bash
+# 克隆仓库
+git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
+cd openclaw-agent-swarm-skills
 
-`swarm` 的隔离模型（每任务独立 worktree/session）非常适合这种“互不依赖”的任务流，不会互相污染 git 状态。
+# 进入 code 目录安装依赖并构建
+cd code
+npm install
+npm run build # 将 src/swarm.ts 编译为 scripts/swarm.js
+cd ..
 
-### 场景 B：任务独立推进，中途只给某个任务加需求
+# 运行部署脚本
+./scripts/build-skill.sh
+```
 
-运行中我会经常出现这种指令：
+### 2. 启动一个批处理任务 (Batch Mode)
+假设你要修复一个内存泄漏的问题，你可以通过 `spawn` 命令创建一个后台任务：
 
-- “只改任务 T3：先做 API，UI 延后”；
-- “任务 T7 额外补一个回归测试”；
-- “任务 T2 改成小步提交”。
+```bash
+# 定义 Skill 路径
+SKILL_ROOT="skills/openclaw-agent-swarm"
 
-这时直接 `attach --id <task> --message "..."`，只影响目标任务，不影响其他并发任务。
-
-### 场景 C：我可能要取消某个任务
-
-在当前实现里，`swarm.js` 没有单独暴露 `cancel` 子命令；实践上通常通过终止该任务对应的 tmux session 来停止执行。状态收敛逻辑会在后续 `check` 中把该任务归并到终态（典型为 `stopped`）。
-
-这个行为非常关键：你不需要等所有任务结束，随时可以止损某个跑偏任务。
-
-### 场景 D：OpenClaw 定时 check 并回传“有变化”的状态
-
-这是你提到的第三点，也是这套架构最像“生产系统”的地方。
-
-- OpenClaw 定时触发 `check-agents.sh`；
-- 实际调用 `swarm check --changes-only`；
-- 只拿到“状态有变化”的任务（完成摘要、失败原因、DoD 结果等）；
-- 再把这些变化消息推给用户（IM 里就能看到）。
-
-好处是：
-
-- 主对话不被轮询噪声淹没；
-- 用户不必盯着终端等待；
-- 可在 IM 里随时补充、改派、停止。
+# 启动任务
+node "$SKILL_ROOT/scripts/swarm.js" spawn \
+  --repo /path/to/your/git/repo \
+  --task "Fix memory leak in buffer.ts" \
+  --mode batch \
+  --agent claude \
+  --required-test "npm test"
+```
+> **注意：** `spawn` 命令会立即返回一个任务 ID，而 Agent 已经在后台的 Tmux 会话中开始工作了。
 
 ---
 
-## 4. 与 Claude Subagents / Agent Teams 的区别
+## 第四部分：硬核功能拆解——深度剖析 6 大核心能力
 
-这块最容易混淆，我按“控制边界”来讲。
+### 1. Git Worktree 物理隔离：真正的“安全屋”
+传统的 Agent 往往直接操作当前目录。Swarm 强制使用 **Git 工作树 (Git Worktree)** 隔离。
+- **技术细节**：每个任务都会在 `~/.agents/agent-swarm/worktree/<repo-name>/<task_id>` 下创建一个全新的工作区，并自动签出一个任务分支 `swarm/<task_id>`。
+- **深度解读**：这种做法比简单的文件夹拷贝高明得多。它保留了完整的 Git 上下文，同时由于是物理隔离，你可以在主分支继续编码，而 Agent 在另一个 Worktree 里跑测试，互不干扰。
 
-### 4.1 OpenClaw Swarm vs Claude Subagents
+### 2. Batch 与 Interactive：双模并行
+Swarm 并不是一种模式走到黑，它支持 **批处理 (Batch)** 和 **交互 (Interactive)** 两种模式。
+- **技术细节**：`batch` 模式是非交互执行，主要依据退出文件 (`exit_file`) 来判定胜负；`interactive` 模式则维持一个长驻的 Tmux 会话。
+- **深度解读**：对于确定的任务（如“格式化所有代码”），用 `batch`；对于需要探索的任务（如“排查一个诡异的 Bug”），用 `interactive`。这意味着你可以在 Agent 思考的过程中，随时介入。
 
-Subagents（官方定义）更像“**同一 Claude 会话内的专长分工**”：
+### 3. Attach：中途下达“锦囊妙计”
+这是 Swarm 最令开发者兴奋的能力——**挂载交互 (Attach)**。
+- **技术细节**：通过 `node swarm.js attach --id <task_id> --message "<message>"`，你可以向正在运行的 `interactive` 任务发送文本。
+- **原理**：Swarm 利用 Tmux 的 `send-keys` 将你的指令实时“粘贴”到 Agent 的输入流中。
+- **注意点**：如果任务已经进入终态（Success/Failed），Attach 会被拒绝。
 
-- 子 agent 在独立上下文完成任务，再把结果返回主会话；
-- 适合输出可摘要、任务自包含的子问题；
-- 官方也强调它有助于上下文管理和成本控制。
+### 4. 任务状态定时检查：心跳 (Heartbeat) 机制
+为了不让协调器被海量日志淹没，Swarm 引入了 **增量检查 (Incremental Check)**。
+- **技术细节**：执行 `node swarm.js check --changes-only`，系统会对比 `last-check.json`，只上报状态发生变化的 Task。
+- **深度解读**：这对于构建“任务大盘”非常有用。它甚至支持“休眠检测”，如果一个交互任务长时间没有输出，状态会自动转为 `pending` 并触发提醒。
 
-而 OpenClaw Swarm 是“**会话外编排**”：
+### 5. 自定义 DoD：严苛的“完工验收单”
+**完成定义 (Definition of Done, DoD)** 是 Swarm 的质量灵魂。
+- **技术细节**：内置 DoD 要求任务必须达到终态、Worktree 必须 Clean，且所有 `--required-test` 命令必须返回 0。
+- **回写机制**：支持手动或通过脚本调用 `update-dod --status pass|fail`。
+- **价值**：它确保了 Agent 不会带着一堆未提交的脏代码或失败的测试用例就告诉你“我做完了”。
 
-- 子任务在外部 CLI 进程（Codex/Claude）+ tmux + worktree 中运行；
-- OpenClaw 主会话只保留控制语义，不吞执行细节；
-- 更接近工程调度器，而不是会话内 delegation。
-
-一句话：**Subagents 偏“同会话内多角色”，Swarm 偏“跨会话跨进程任务编排”。**
-
-### 4.2 OpenClaw Swarm vs Claude Agent Teams
-
-Agent Teams（官方文档）是 Claude 原生的多会话协作机制，特点是：
-
-- lead + teammates；
-- teammate 之间可直接通信；
-- 有共享任务列表与协作机制；
-- 但官方明确：实验特性、默认关闭、且 token 成本更高。
-
-OpenClaw Swarm 的定位不同：
-
-- 不追求 agent 内部“自由协作讨论”，而是追求“任务隔离 + 异步执行 + 人可控介入”；
-- 通过 IM 做统一人机入口，适合移动端/碎片化操作；
-- 更强调工程可运维性（状态收敛、DoD、日志与 worktree 可追踪）。
-
-如果你的任务是“多个独立工程单元并发推进”，Swarm 往往更直接；
-如果你的任务是“多 agent 互相辩论/共同推理”，Agent Teams 机制更原生。
+### 6. 任务继承 (Follow-up)：平滑的任务接力
+当一个任务结束，但你需要基于它的成果继续修改时，`spawn-followup` 就派上用场了。
+- **技术细节**：你可以选择 `new`（新工作区）或 `reuse`（复用原工作区）。
+- **深度解读**：`reuse` 模式非常巧妙，它会检查原 Worktree 是否干净、分支是否可解析，并在原有的基础上继续对话，完美保留了上下文。
 
 ---
 
-## 5. 一个实用决策表
+## 第五部分：高互动收尾
 
-- 任务独立、可拆分、希望随时从 IM 介入：用 **OpenClaw Swarm**。
-- 需要在 Claude 内部做角色化分工、结果回主会话：用 **Subagents**。
-- 需要多个 Claude 会话互相通信协作：用 **Agent Teams**（接受更高 token 与实验特性约束）。
+OpenClaw Agent Swarm 的出现，标志着 Agent 已经从“玩具时代”迈向了“工程时代”。通过将晦涩的 Git 指令和 Tmux 管理封装成一套标准的 JSON 状态机，它让大规模 Agent 协作成为可能。
 
----
+**一句话总结：它是 Agent 时代的“操作系统内核”，负责资源隔离与进程调度。**
 
-## 6. 我当前的默认工作流
+> **开放话题讨论：**
+> 你觉得在本地开发中，这种基于 Worktree 的 Agent 协作模式，是否会成为未来 IDE 的标配功能？它能彻底替代目前那种“在一个对话框里修修补补”的模式吗？
 
-1. 在 OpenClaw 发起多个 `spawn`（按任务指定 `codex` 或 `claude`）。
-2. OpenClaw heartbeat 定时跑 `check-agents.sh`，只回传变化。
-3. 我在 IM 里对单任务 `attach` 补需求，必要时终止跑偏任务。
-4. 任务 `success + DoD pass` 后再人工确认是否 `publish/create-pr`。
-
-这套流的核心不是“谁更聪明”，而是：**把交互面、执行面、回收面分开**。
-
-当你开始同时推进多个需求时，这种分层会比“一个会话硬顶到底”稳定得多。
-
----
-
-## 参考资料
-
-- OpenClaw Agent Swarm 项目说明：`README.zh-CN.md`（本仓库）
-- Claude Code Docs - Subagents: https://code.claude.com/docs/en/sub-agents
-- Claude Code Docs - Agent Teams: https://code.claude.com/docs/en/agent-teams
-
+欢迎在评论区分享你的看法，或者直接在 [GitHub 仓库](https://github.com/youzaiAGI/openclaw-agent-swarm-skills) 提交你的 PR！

@@ -23,6 +23,8 @@ English | [简体中文](docs/README.zh-CN.md)
 
 The swarm ensures safe and controllable execution through multiple layers of isolation:
 
+![Architecture](docs/arch.svg)
+
 ```mermaid
 flowchart LR
     Coordinator[Coordinator Agent] --> Swarm[Swarm Skill]
