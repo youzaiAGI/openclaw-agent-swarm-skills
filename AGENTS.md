@@ -8,12 +8,12 @@
 
 - Use script: `scripts/regression-swarm-concurrency.sh`
 - The script creates a temporary empty git repository under `/tmp`, runs regression, then removes the temp repository automatically.
-- Fixed workload: 20 concurrent tasks (`codex` 10 + `claude` 10), mixed read-only and write tasks.
+- Fixed workload: 12 concurrent tasks (`codex` + `claude` + `gemini`, each with `batch/interactive` x `read-only/write`).
 - The script validates:
 - spawn phase has no concurrency/lock conflict failure
-- all 20 tasks converge from `running` to terminal status (`stopped`/`success`/`failed`/`needs_human`)
-- write-task samples include file + expected commit verification for both agents
+- all batch tasks converge to `success`, all interactive tasks converge to `stopped`
+- all tasks have DoD status `pass`
+- all write tasks have at least one extra commit on top of repo init commit
+- batch write samples include file + expected commit message verification for all supported agents
 - Run command:
 - `./scripts/regression-swarm-concurrency.sh`
-- Optional timeout (seconds), default `900`:
-- `./scripts/regression-swarm-concurrency.sh 1200`

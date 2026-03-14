@@ -10,7 +10,7 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 ## Hard Rules
 
 1. Refuse execution when target path is not a git repository.
-2. Require local tools before spawn: `git`, `tmux`, and at least one of `codex` / `claude`.
+2. Require local tools before spawn: `git`, `tmux`, and at least one of `codex` / `claude` / `gemini`.
 3. Default mode is `batch`; mode can be `interactive` or `batch`.
 4. `attach` is only allowed for non-terminal `interactive` tasks.
 5. Task status set is fixed: `running | pending | success | failed | stopped`.
@@ -29,7 +29,7 @@ How to evaluate DoD:
 - Batch mode: evaluate default DoD only when task transitions to `success`.
 - Batch mode: if task transitions to `failed` or `stopped`, set DoD to failed directly.
 - Other `updateStatus` cases do not evaluate DoD.
-- Default DoD checks are: allowed terminal status + worktree clean.
+- Default DoD checks are: allowed terminal status + worktree clean + all `required_tests` pass.
 - Extra DoD method 1: put semantic acceptance rules in `references/dod.md` (for example: must push, must have new commits).
 - Extra DoD method 2: pass repeated `--required-test "<cmd>"` at `spawn`; all commands must exit with code `0`.
 - Each required test result is recorded in `task.dod.result.checks`.
@@ -63,7 +63,7 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn \
   --repo <git_repo_path> \
   --task "<task>" \
   [--mode interactive|batch] \
-  [--agent codex|claude] \
+  [--agent codex|claude|gemini] \
   [--required-test "<cmd>"]...
 ```
 
@@ -74,9 +74,15 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --task "<task>" \
   --worktree-mode new|reuse \
-  [--mode interactive|batch] \
+  [--agent codex|claude|gemini] \
   [--required-test "<cmd>"]...
 ```
+
+Follow-up behavior:
+- both `new` and `reuse` reuse parent worktree (no new worktree is created)
+- mode always follows parent task mode
+- `new`: starts a new session without conversation resume; agent defaults to parent agent if not specified
+- `reuse`: starts a new session with conversation resume; agent must match parent agent
 
 Attach:
 
