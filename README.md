@@ -3,25 +3,13 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](code/src/swarm.ts)
 
-**OpenClaw Agent Swarm** is a unified execution layer for orchestrating AI coding agents (such as Codex, Claude Code, and Gemini) in isolated, asynchronous environments.
+**OpenClaw Agent Swarm** is a high-performance execution layer that enables AI agents to run coding tasks in isolated, asynchronous environments using **Git Worktrees** and **Tmux**.
 
 English | [简体中文](docs/README.zh-CN.md)
 
 ---
 
-## 🚀 Key Features
-
-- **Isolated Execution**: Automatically creates a dedicated Git Worktree and Branch for every task, ensuring zero interference.
-- **Asynchronous Scheduling**: Supports long-running background tasks (Batch mode) or real-time human-in-the-loop interaction (Interactive mode).
-- **Incremental Monitoring**: Provides a heartbeat polling mechanism that only reports changed task states.
-- **DoD Driven**: Built-in and extensible "Definition of Done" (DoD) checks to ensure high-quality code changes.
-- **Multi-Agent Support**: A unified CLI interface for Codex, Claude Code, and Gemini.
-
----
-
 ## 🏗️ Architecture at a Glance
-
-The swarm ensures safe and controllable execution through multiple layers of isolation:
 
 ![Architecture](docs/arch.svg)
 
@@ -29,53 +17,53 @@ The swarm ensures safe and controllable execution through multiple layers of iso
 
 ## 🛠️ Installation
 
-This project is a **Skill** designed for AI agents (e.g., Gemini CLI, OpenClaw). To install it, simply provide the following prompt to your agent:
+Simply provide the following prompt to your AI agent (e.g., Gemini CLI, OpenClaw):
 
 > **"Install this skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills/tree/main/skills/openclaw-agent-swarm"**
 
-### Prerequisites
-Ensure your local environment has the following tools installed:
-- **OS**: macOS or Linux
-- **Node.js**: >= 18
-- **Dependencies**: `git`, `tmux`, and at least one agent CLI (`codex`, `claude`, or `gemini`).
-
-For manual deployment or advanced setup, see the [Getting Started](docs/getting-started.md) guide.
+*Note: Ensure your local environment has `git`, `tmux`, and at least one agent CLI (`codex`, `claude`, or `gemini`) installed.*
 
 ---
 
-## 📖 Documentation Index
+## 📖 Quick Start (Natural Language Guide)
 
-For detailed guides and references, please explore our documentation:
+Once installed, you can control the swarm using plain English. Your agent will translate these intents into the appropriate underlying commands.
 
-### 🏁 [Getting Started](docs/getting-started.md)
-Step-by-step instructions for installation, configuration, and running your first task.
+### 1. Starting a Task
+You can ask your agent to start a task in **Batch** (background) or **Interactive** (attachable) mode.
 
-### 🏛️ [Architecture](docs/architecture.md)
-In-depth look at how the swarm uses Git Worktree, Tmux, and local state for isolation and execution.
+*   **Prompt**: "Start a batch task to refactor the login service in `/path/to/repo`. Use Claude and ensure `npm test` passes."
+*   **Prompt**: "Investigate the memory leak in the buffer module interactively. Use Codex."
 
-### 📜 [CLI Reference](docs/cli-reference.md)
-Complete manual for every subcommand and option available in the `swarm.js` tool.
+### 2. Checking Status
+There are two ways the swarm tracks progress:
 
-### ✅ [DoD Workflow](docs/dod-workflow.md)
-Explanation of the "Definition of Done" process, including automated tests and semantic checks.
+*   **User Check**: You can ask at any time.
+    *   **Prompt**: "Show me the status of my active coding tasks."
+    *   **Prompt**: "What is the progress of the 'refactor-login' task?"
+*   **Automatic Heartbeat (OpenClaw)**: The swarm includes a `check-agents.sh` script that the coordinator runs automatically in the background. It only reports tasks that have **changed state** (e.g., from `running` to `success`), ensuring you aren't overwhelmed by logs.
 
-### 🤖 [Agent Integration](docs/agent-integration.md)
-Guidelines for configuring and using different AI coding agents within the swarm.
+### 3. Defining Task Completion (DoD)
+A task is only "Done" when it satisfies the **Definition of Done (DoD)**.
 
-### 🛠️ [Troubleshooting](docs/troubleshooting.md)
-Common issues, error messages, and their corresponding solutions.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! If you're modifying the core logic, please remember:
-1. Edit the TypeScript source in `code/src/swarm.ts`.
-2. Run `npm run build` to synchronize the compiled JavaScript.
-3. Verify your changes using the provided regression scripts in `scripts/`.
+*   **CI Commands**: You can define strict gates when starting a task (as shown in the "Starting a Task" example). If `npm test` fails, the DoD fails.
+*   **Semantic DoD (`dod.md`)**: For complex logic, the agent will check the `docs/dod.md` file in the worktree.
+    *   **Prompt**: "Check the DoD for task A. If all semantic rules in `dod.md` are met, mark it as passed."
+*   **Manual Intervention**:
+    *   **Prompt**: "I've reviewed the code for task B. Manually update its DoD to 'pass'."
 
 ---
 
-## 📄 License
+## 🌟 Advanced Capabilities
 
-This project is licensed under the [MIT License](LICENSE).
+*   **Attach/Cancel**: Middle of a task? Use `Attach "Please also update the docs"` to send live instructions, or `Cancel` to stop immediately.
+*   **Worktree Isolation**: Every task gets its own physical directory. No more "breaking" your main workspace while the agent works.
+*   **Follow-up Tasks**: "The last task failed. Start a follow-up in the same worktree to fix the broken tests."
+
+---
+
+## 📂 Documentation Reference
+
+*   [CLI Reference](docs/cli-reference.md) - For manual command usage.
+*   [State & JSON Format](skills/openclaw-agent-swarm/references/state-format.md) - For developers integrating the swarm.
+*   [Troubleshooting](docs/troubleshooting.md) - Dealing with locks, tmux sessions, and more.

@@ -3,25 +3,13 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](../code/src/swarm.ts)
 
-**OpenClaw Agent Swarm** 是一个统一的执行层，用于在隔离、异步的环境中编排 AI 编程 Agent（如 Codex、Claude Code 和 Gemini）。
+**OpenClaw Agent Swarm** 是一个专为 AI Agent 设计的高性能执行层。它利用 **Git Worktree** 和 **Tmux**，让 Agent 在物理隔离且可随时介入的环境中异步执行编程任务。
 
 [English](../README.md) | 简体中文
 
 ---
 
-## 🚀 核心特性
-
-- **物理隔离执行**：为每个任务自动创建独立的 Git Worktree 和 Branch，确保开发环境互不干扰。
-- **异步任务调度**：支持长时运行的后台任务（Batch 模式）或实时的人机协同交互（Interactive 模式）。
-- **增量状态监控**：提供心跳轮询机制，仅上报状态发生变化的 Task，降低监控开销。
-- **DoD 质量驱动**：内置并可扩展的「完成定义 (Definition of Done)」检查，确保代码变更符合质量标准。
-- **多 Agent 支持**：为 Codex、Claude Code 和 Gemini 提供统一的命令行调用接口。
-
----
-
 ## 🏗️ 架构概览
-
-Swarm 通过多层隔离机制确保 Agent 执行过程的安全与可控：
 
 ![架构图](arch.svg)
 
@@ -29,53 +17,53 @@ Swarm 通过多层隔离机制确保 Agent 执行过程的安全与可控：
 
 ## 🛠️ 快速安装
 
-本项目是为 AI Agent（如 Gemini CLI、OpenClaw）设计的 **Skill**。你只需向你的 Agent 提供以下提示词即可完成自动安装：
+只需向你的 AI Agent（如 Gemini CLI、OpenClaw）提供以下提示词，它将自动完成安装：
 
 > **“安装这个 skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills/tree/main/skills/openclaw-agent-swarm”**
 
-### 前置条件
-请确保本地环境已安装以下工具：
-- **操作系统**: macOS 或 Linux
-- **Node.js**: >= 18
-- **依赖工具**: `git`, `tmux`, 以及至少一个 Agent CLI (`codex`, `claude` 或 `gemini`)。
-
-如果你需要手动构建或进行高级配置，请参考 [快速入门 (Getting Started)](getting-started.md) 指南。
+*注意：请确保你的本地环境已预装 `git`, `tmux`, 以及至少一个 Agent CLI (`codex`, `claude` 或 `gemini`)。*
 
 ---
 
-## 📖 文档索引
+## 📖 快速上手（自然语言交互指南）
 
-关于详细指南和参考资料，请参阅以下文档（目前仅提供英文版）：
+安装完成后，你可以直接用普通话与你的 Agent 对话来控制 Swarm，Agent 会自动将其转化为底层的 CLI 命令。
 
-### 🏁 [快速入门 (Getting Started)](getting-started.md)
-安装、配置及运行第一个任务的分步说明。
+### 1. 启动任务
+你可以启动 **批处理 (Batch)** 模式（后台静默执行）或 **交互 (Interactive)** 模式（可随时介入）。
 
-### 🏛️ [架构设计 (Architecture)](architecture.md)
-深入了解 Swarm 如何利用 Git Worktree、Tmux 和本地状态实现任务隔离与执行。
+*   **对话示例**: “在 `/path/to/repo` 启动一个批处理任务，重构登录服务。使用 Claude Agent 并确保 `npm test` 通过。”
+*   **对话示例**: “以交互模式排查 buffer 模块的内存泄漏问题。使用 Codex Agent。”
 
-### 📜 [CLI 参考手册 (CLI Reference)](cli-reference.md)
-`swarm.js` 工具中每个子命令及参数的完整说明。
+### 2. 状态检查
+Swarm 提供了两种方式来追踪进度：
 
-### ✅ [DoD 工作流 (DoD Workflow)](dod-workflow.md)
-「完成定义」流程详解，包含自动化测试和语义化检查。
+*   **主动查询**: 你可以随时向 Agent 提问。
+    *   **对话示例**: “帮我查一下当前正在运行的编程任务状态。”
+    *   **对话示例**: “那个‘重构登录’的任务现在进度如何了？”
+*   **自动心跳检查 (OpenClaw)**: Swarm 内置了 `check-agents.sh` 脚本。协调器（Coordinator）会在后台自动运行它，并**只回报状态发生变化的任务**（例如从 `running` 变为 `success`），确保你不会被冗余日志淹没。
 
-### 🤖 [Agent 集成 (Agent Integration)](agent-integration.md)
-在 Swarm 中配置和使用不同 AI 编程 Agent 的指南。
+### 3. 定义任务完成 (DoD)
+任务只有在满足 **「完成定义 (Definition of Done, DoD)」** 时才会被标记为真正完成。
 
-### 🛠️ [问题排查 (Troubleshooting)](troubleshooting.md)
-常见问题、错误信息及其对应的解决方案。
-
----
-
-## 🤝 参与贡献
-
-欢迎提交 Issue 或 Pull Request。在修改核心逻辑时，请务必注意：
-1. 修改 `code/src/swarm.ts` 中的 TypeScript 源码。
-2. 运行 `npm run build` 同步编译生成的 JavaScript。
-3. 使用 `scripts/` 目录下的回归脚本验证你的更改。
+*   **CI 命令校验**: 在启动任务时，你可以直接定义“门禁”（如上述示例中的 `npm test`）。如果命令执行失败，则任务不通过。
+*   **语义化 DoD (`dod.md`)**: 对于复杂的业务逻辑，Agent 会检查 Worktree 中的 `docs/dod.md` 文件。
+    *   **对话示例**: “检查任务 A 的 DoD。如果 `dod.md` 中的所有语义规则都已满足，则将其标记为已完成。”
+*   **人工干预**:
+    *   **对话示例**: “我刚人工审核了任务 B 的代码。将它的 DoD 手动更新为‘通过’。”
 
 ---
 
-## 📄 开源协议
+## 🌟 进阶能力
 
-本项目采用 [MIT License](LICENSE) 协议。
+*   **中途干预/取消**: 任务运行中想改主意？直接说“向任务发送补充要求：也要更新文档”或“取消这个任务”，Swarm 会立即执行。
+*   **物理隔离隔离 (Worktree Isolation)**: 每个任务都有自己的物理目录。Agent 干活时，你可以继续在主工程里编码，互不干扰。
+*   **任务继承 (Follow-up)**: “上个任务失败了，在同一个 Worktree 里启动一个后续任务，修复那个报错的测试用例。”
+
+---
+
+## 📂 进阶文档索引
+
+*   [CLI 命令行参考](cli-reference.md) - 手动执行 Shell 命令的完整手册。
+*   [状态协议 & JSON 格式](../skills/openclaw-agent-swarm/references/state-format.md) - 开发者对接 Swarm 时的技术细节。
+*   [问题排查](troubleshooting.md) - 处理文件锁、Tmux 会话丢失等异常情况。
