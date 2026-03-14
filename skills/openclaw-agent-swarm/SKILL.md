@@ -23,6 +23,11 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 References:
 - `references/dod.md`
 
+Status model (must treat as two independent axes):
+- `task.status` is execution lifecycle state: `running | pending | success | failed | stopped`.
+- `task.dod.status` is acceptance state: `pass | fail` (or missing before evaluation/writeback).
+- DoD changes do not rewrite `task.status`; execution status changes do not imply DoD pass.
+
 
 How to evaluate DoD:
 - Spawn/spawn-followup does not evaluate DoD; default `task.dod` is empty `{}`.
