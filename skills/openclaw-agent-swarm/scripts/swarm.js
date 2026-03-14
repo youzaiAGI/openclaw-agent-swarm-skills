@@ -23,6 +23,8 @@ const REMINDER_MAX = 3;
 const REMINDER_INTERVAL_SEC = 3600;
 const DOD_PASS = 'pass';
 const DOD_FAIL = 'fail';
+const SELF_NODE_BIN = process.execPath;
+const SELF_SCRIPT_PATH = path.resolve(process.argv[1] || __filename);
 function printJson(payload) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -209,6 +211,7 @@ function detectTools() {
     return {
         codex: has('codex'),
         claude: has('claude'),
+        gemini: has('gemini'),
         tmux: has('tmux'),
         git: has('git'),
     };
@@ -223,7 +226,9 @@ function pickAgent(requested, tools) {
         return 'codex';
     if (tools.claude)
         return 'claude';
-    fail('neither codex nor claude is installed');
+    if (tools.gemini)
+        return 'gemini';
+    fail('none of codex, claude, gemini is installed');
 }
 function validateAgentCommand(agent) {
     const cp = run([agent, '--version'], undefined, false);
@@ -285,9 +290,6 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:repo_missing_or_not_git', {}];
     if (!isGitRepo(wt))
         return [false, 'reuse_guard_failed:worktree_not_git', {}];
-    const status = run(['git', 'status', '--porcelain'], wt, false);
-    if (status.code !== 0 || status.stdout.trim() !== '')
-        return [false, 'reuse_guard_failed:worktree_not_clean', {}];
     const sess = parent.tmux_session || '';
     if (sess && run(['tmux', 'has-session', '-t', sess], undefined, false).code === 0) {
         return [false, 'reuse_guard_failed:parent_session_running', {}];
@@ -297,19 +299,39 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:branch_unresolvable', {}];
     return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
-function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
+function buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath, continueSession = false) {
     const promptQ = shellQuote(promptPath);
     const logQ = shellQuote(logPath);
     const exitQ = shellQuote(exitPath);
+    const nodeQ = shellQuote(SELF_NODE_BIN);
+    const scriptQ = shellQuote(SELF_SCRIPT_PATH);
+    const taskQ = shellQuote(taskId);
+    const onExitCmd = `${nodeQ} ${scriptQ} on-exit --id ${taskQ} --exit-code "$ec" >> ${logQ} 2>&1 || true;`;
     let interactiveBase = '';
     let batchBase = '';
     if (agent === 'codex') {
-        interactiveBase = 'codex --dangerously-bypass-approvals-and-sandbox';
-        batchBase = 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"';
+        interactiveBase = continueSession
+            ? 'codex resume --last --dangerously-bypass-approvals-and-sandbox'
+            : 'codex --dangerously-bypass-approvals-and-sandbox';
+        batchBase = continueSession
+            ? 'codex exec resume --last "$prompt" --dangerously-bypass-approvals-and-sandbox'
+            : 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"';
     }
     else if (agent === 'claude') {
-        interactiveBase = 'claude --dangerously-skip-permissions';
-        batchBase = 'claude --dangerously-skip-permissions -p "$prompt"';
+        interactiveBase = continueSession
+            ? 'claude --continue --dangerously-skip-permissions'
+            : 'claude --dangerously-skip-permissions';
+        batchBase = continueSession
+            ? 'claude --dangerously-skip-permissions --continue -p "$prompt"'
+            : 'claude --dangerously-skip-permissions -p "$prompt"';
+    }
+    else if (agent === 'gemini') {
+        interactiveBase = continueSession
+            ? 'gemini --resume latest --yolo'
+            : 'gemini --yolo';
+        batchBase = continueSession
+            ? 'gemini --resume latest --prompt "$prompt" --yolo'
+            : 'gemini --prompt "$prompt" --yolo';
     }
     else {
         fail(`unsupported agent: ${agent}`);
@@ -321,6 +343,7 @@ function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
             `${batchBase} >> ${logQ} 2>&1;`,
             'ec=$?;',
             `echo "$ec" > ${exitQ};`,
+            onExitCmd,
         ].join(' ');
     }
     return [
@@ -328,6 +351,7 @@ function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
         `${interactiveBase};`,
         'ec=$?;',
         `echo "$ec" > ${exitQ};`,
+        onExitCmd,
         'exec bash',
     ].join(' ');
 }
@@ -498,7 +522,7 @@ function buildPrompt(taskId, _repo, worktree, userTask, parentTaskId = '') {
         '',
     ].join('\n');
 }
-function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId = '', requiredTests = []) {
+function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId = '', requiredTests = [], continueSession = false) {
     ensureGlobalStateDir();
     const logsDir = path.join(GLOBAL_STATE_DIR, 'logs');
     const promptsDir = path.join(GLOBAL_STATE_DIR, 'prompts');
@@ -515,7 +539,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId =
         fs.writeFileSync(exitPath, '', 'utf-8');
         fs.rmSync(exitPath, { force: true });
     }
-    const cmd = buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath);
+    const cmd = buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath, continueSession);
     tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
     if (mode === MODE_INTERACTIVE) {
         run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
@@ -576,6 +600,7 @@ function dodPassed(dod) {
 function evaluateDefaultDod(task) {
     const worktree = String(task.worktree || '');
     const status = String(task.status || '');
+    const mode = normalizeMode(task.mode);
     const requiredTests = normalizeRequiredTests(task.required_tests);
     const result = {
         reason: '',
@@ -596,6 +621,12 @@ function evaluateDefaultDod(task) {
     }
     if (!result.terminal) {
         result.reason = `status_not_terminal:${status || 'unknown'}`;
+        return dod;
+    }
+    const statusAllowed = (mode === MODE_INTERACTIVE && status === 'stopped')
+        || (mode === MODE_BATCH && status === 'success');
+    if (!statusAllowed) {
+        result.reason = `status_not_allowed_for_default_dod:${status || 'unknown'}`;
         return dod;
     }
     const sp = run(['git', 'status', '--porcelain'], worktree, false);
@@ -630,6 +661,39 @@ function evaluateDefaultDod(task) {
     dod.status = DOD_PASS;
     result.reason = 'ok';
     return dod;
+}
+function buildDodFailedByStatus(task, status) {
+    return {
+        status: DOD_FAIL,
+        result: {
+            reason: `status_forced_fail:${status || 'unknown'}`,
+            error: '',
+            terminal: isTerminalStatus(status),
+            worktree_clean: false,
+            checks: [],
+        },
+        required_tests: normalizeRequiredTests(task.required_tests),
+        updated_at: nowIso(),
+    };
+}
+function applyDodOnStatusTransition(task, oldStatus, nextStatus, mode) {
+    if (oldStatus === nextStatus)
+        return;
+    if (mode === MODE_INTERACTIVE && nextStatus === 'failed') {
+        task.dod = buildDodFailedByStatus(task, nextStatus);
+        return;
+    }
+    if (mode === MODE_INTERACTIVE && nextStatus === 'stopped') {
+        task.dod = evaluateDefaultDod(task);
+        return;
+    }
+    if (mode === MODE_BATCH && nextStatus === 'success') {
+        task.dod = evaluateDefaultDod(task);
+        return;
+    }
+    if (mode === MODE_BATCH && (nextStatus === 'failed' || nextStatus === 'stopped')) {
+        task.dod = buildDodFailedByStatus(task, nextStatus);
+    }
 }
 function parseRemoteUrl(remoteUrl) {
     const url = remoteUrl.trim();
@@ -684,8 +748,7 @@ function buildManualPrUrl(forgeInfo, sourceBranch, targetBranch) {
 function ensurePublishable(task) {
     if (task.status !== 'success')
         fail(`task is not success: ${task.status}`);
-    const dod = task.dod || evaluateDefaultDod(task);
-    task.dod = dod;
+    const dod = task.dod && typeof task.dod === 'object' ? task.dod : {};
     if (!dodPassed(dod))
         fail(`task DoD not pass: ${(dod.result || {}).reason || 'unknown'}`);
 }
@@ -775,7 +838,6 @@ function updateStatus(task, opts) {
     const now = new Date();
     const nowIsoStr = now.toISOString();
     if (isTerminalStatus(old)) {
-        task.dod = evaluateDefaultDod(task);
         return task;
     }
     const excerpt = readLogExcerpt(logPath);
@@ -826,12 +888,14 @@ function updateStatus(task, opts) {
             convergedReason = 'tmux_not_alive_interactive';
         }
         else if (exitFile && fs.existsSync(exitFile)) {
-            // Interactive mode converges to stopped once agent exits unexpectedly.
+            // Interactive mode should not normally emit exit file; if it does, treat as failed.
             const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
             const code = Number.parseInt(codeText, 10);
             task.exit_code = Number.isNaN(code) ? 1 : code;
-            next = 'stopped';
+            next = 'failed';
             convergedReason = `interactive_exit_code:${task.exit_code}`;
+            if (alive)
+                tmuxCloseSession(session);
         }
         else {
             next = hasRunningHint ? 'running' : 'pending';
@@ -854,7 +918,7 @@ function updateStatus(task, opts) {
         if (convergedReason)
             task.converged_reason = convergedReason;
     }
-    task.dod = evaluateDefaultDod(task);
+    applyDodOnStatusTransition(task, old, next, mode);
     return task;
 }
 function isTerminalStatus(status) {
@@ -965,7 +1029,7 @@ function cmdSpawn(opts) {
     }
     const wtMeta = createWorktree(repo, taskId);
     const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, '', requiredTests);
-    task.dod = evaluateDefaultDod(task);
+    task.dod = {};
     saveTask(task);
     printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
 }
@@ -975,8 +1039,7 @@ function cmdSpawnFollowup(opts) {
         fail('tmux is not installed');
     if (!tools.git)
         fail('git is not installed');
-    const agent = pickAgent(opts.agent, tools);
-    validateAgentCommand(agent);
+    const worktreeMode = String(opts.worktreeMode || '').toLowerCase();
     const tasks = loadTasks();
     const parent = tasks.find((t) => t.id === opts.from);
     if (!parent)
@@ -984,10 +1047,28 @@ function cmdSpawnFollowup(opts) {
     if (!isTerminalStatus(String(parent.status || ''))) {
         fail(`follow-up only allowed for terminal parent task, got: ${parent.status || 'unknown'}`);
     }
+    const parentAgent = String(parent.agent || '').trim();
+    if (!parentAgent)
+        fail(`parent task agent missing: ${opts.from}`);
+    const requestedAgent = String(opts.agent || '').trim();
+    let agent = '';
+    if (worktreeMode === 'reuse') {
+        if (requestedAgent && requestedAgent !== parentAgent) {
+            fail(`reuse mode requires same agent as parent: parent=${parentAgent} requested=${requestedAgent}`);
+        }
+        agent = parentAgent;
+    }
+    else {
+        agent = requestedAgent || parentAgent;
+    }
+    if (!agent || !tools[agent]) {
+        fail(`follow-up agent '${agent || 'unknown'}' is not installed`);
+    }
+    validateAgentCommand(agent);
     const repo = path.resolve(parent.repo || '');
     if (!isGitRepo(repo))
         fail(`parent repo is invalid or not git: ${repo}`);
-    const mode = normalizeMode(opts.mode || parent.mode || MODE_BATCH);
+    const mode = normalizeMode(parent.mode || MODE_BATCH);
     const requiredTests = normalizeRequiredTests(opts.requiredTest !== undefined ? opts.requiredTest : parent.required_tests);
     const existing = new Set(tasks.map((t) => String(t.id || '')));
     let taskId = String(opts.name || '').trim();
@@ -1000,19 +1081,14 @@ function cmdSpawnFollowup(opts) {
             taskId = nowId();
         while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
     }
-    let wtMeta;
-    if (opts.worktreeMode === 'new')
-        wtMeta = createWorktree(repo, taskId);
-    else {
-        const [ok, reason, meta] = prepareReusedWorktree(parent);
-        if (!ok)
-            fail(reason);
-        wtMeta = meta;
-    }
+    const [ok, reason, wtMeta] = prepareReusedWorktree(parent);
+    if (!ok)
+        fail(reason);
     const parentId = parent.id || '';
-    const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests);
+    const continueSession = worktreeMode === 'reuse';
+    const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests, continueSession);
     task.worktree_mode = opts.worktreeMode;
-    task.dod = evaluateDefaultDod(task);
+    task.dod = {};
     saveTask(task);
     printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
 }
@@ -1024,6 +1100,16 @@ function cmdAttach(opts) {
     const msg = String(opts.message || '').trim();
     if (!msg)
         fail('message is empty');
+    const status = String(task.status || 'unknown');
+    if (isTerminalStatus(status)) {
+        printJson({
+            ok: false,
+            id: opts.id,
+            error: `task_already_terminal:${status}`,
+            requires_confirmation: false,
+        });
+        return;
+    }
     const mode = normalizeMode(task.mode);
     if (!modeSupportsAttach(mode)) {
         printJson({
@@ -1039,37 +1125,7 @@ function cmdAttach(opts) {
         });
         return;
     }
-    const status = task.status || 'unknown';
-    const runningLike = new Set(['running', 'pending']);
-    if (!runningLike.has(status)) {
-        printJson({
-            ok: true,
-            id: opts.id,
-            sent: false,
-            requires_confirmation: true,
-            reason: `task_not_running:${status}`,
-            actions: [
-                { action: 'spawn_followup_new_worktree', recommended: true },
-                { action: 'spawn_followup_reuse_worktree', recommended: false },
-            ],
-        });
-        return;
-    }
     const session = task.tmux_session || '';
-    if (!tmuxAlive(session)) {
-        printJson({
-            ok: true,
-            id: opts.id,
-            sent: false,
-            requires_confirmation: true,
-            reason: 'session_not_alive',
-            actions: [
-                { action: 'spawn_followup_new_worktree', recommended: true },
-                { action: 'spawn_followup_reuse_worktree', recommended: false },
-            ],
-        });
-        return;
-    }
     try {
         tmuxSendText(session, msg);
     }
@@ -1088,6 +1144,7 @@ function cmdCancel(opts) {
     if (!task)
         fail(`task not found: ${opts.id}`);
     const status = String(task.status || 'unknown');
+    const mode = normalizeMode(task.mode);
     const session = String(task.tmux_session || '');
     const reason = String(opts.reason || '').trim();
     const now = nowIso();
@@ -1121,7 +1178,7 @@ function cmdCancel(opts) {
         session_killed: killed,
         reason,
     };
-    task.dod = evaluateDefaultDod(task);
+    applyDodOnStatusTransition(task, status, 'stopped', mode);
     saveTask(task);
     printJson({
         ok: true,
@@ -1132,13 +1189,69 @@ function cmdCancel(opts) {
         cancel: task.cancel,
     });
 }
+function cmdOnExit(opts) {
+    if (!opts.id)
+        fail('on-exit requires --id');
+    const id = String(opts.id);
+    let task = loadTaskById(id);
+    if (!task) {
+        // Spawn can save task metadata slightly after tmux starts; allow short retry window.
+        for (let i = 0; i < 30 && !task; i += 1) {
+            sleepMs(100);
+            task = loadTaskById(id);
+        }
+    }
+    if (!task)
+        fail(`task not found: ${opts.id}`);
+    const mode = normalizeMode(task.mode);
+    const old = String(task.status || 'running');
+    if (isTerminalStatus(old)) {
+        printJson({ ok: true, id: task.id, already_terminal: true, status: old });
+        return;
+    }
+    const ecNum = Number.parseInt(String(opts.exitCode ?? ''), 10);
+    const exitCode = Number.isNaN(ecNum) ? 1 : ecNum;
+    const next = mode === MODE_BATCH
+        ? (exitCode === 0 ? 'success' : 'failed')
+        : 'failed';
+    const now = nowIso();
+    task.mode = mode;
+    task.exit_code = exitCode;
+    task.status = next;
+    task.updated_at = now;
+    task.last_activity_at = now;
+    task.converged_at = now;
+    task.converged_reason = mode === MODE_BATCH
+        ? `exit_file_code:${exitCode}`
+        : `interactive_exit_code:${exitCode}`;
+    applyDodOnStatusTransition(task, old, next, mode);
+    saveTask(task);
+    const session = String(task.tmux_session || '');
+    if (session)
+        tmuxCloseSession(session);
+    const exitFile = String(task.exit_file || '');
+    if (exitFile) {
+        try {
+            fs.rmSync(exitFile, { force: true });
+        }
+        catch {
+            // Ignore cleanup failure; status already persisted.
+        }
+    }
+    printJson({ ok: true, id: task.id, status: task.status, exit_code: task.exit_code, converged_reason: task.converged_reason });
+}
 function cmdCheck(opts) {
     const loaded = loadTasks();
     const now = new Date();
     const refreshFlags = loaded.map((t) => {
         const mode = normalizeMode(t.mode);
-        if (mode === MODE_INTERACTIVE)
+        if (mode === MODE_INTERACTIVE) {
+            if (isTerminalStatus(String(t.status || '')))
+                return false;
+            if (!tmuxAlive(String(t.tmux_session || '')))
+                return true;
             return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
+        }
         return true;
     });
     const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
@@ -1227,18 +1340,9 @@ function cmdList() {
     printJson({ ok: true, registry: GLOBAL_TASKS_DIR, tasks: loadTasks() });
 }
 function parseDodPayload(opts) {
-    if (opts.resultFile) {
-        const p = path.resolve(String(opts.resultFile));
-        if (!fs.existsSync(p))
-            fail(`result file not found: ${p}`);
-        const data = loadJson(p, null);
-        if (!data || typeof data !== 'object')
-            fail(`invalid result file json: ${p}`);
-        return data;
-    }
     const status = String(opts.status || '').toLowerCase();
     if (!status)
-        fail('update-dod requires --result-file <json> or --status <pass|fail>');
+        fail('update-dod requires --status <pass|fail> [--result <json>]');
     const payload = {
         status,
         result: {},
@@ -1504,18 +1608,20 @@ function showHelp() {
         '  publish',
         '  create-pr',
         '  list',
+        '  on-exit (internal)',
         '',
     ].join('\n'));
 }
 function showCommandHelp(cmd) {
     const lines = {
-        spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
-        'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
+        spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
+        'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
         attach: ['usage: swarm.ts attach --id <id> --message <text>'],
         cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
         check: ['usage: swarm.ts check [--changes-only]'],
         status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
-        'update-dod': ['usage: swarm.ts update-dod --id <id> (--result-file <json> | --status pass|fail [--result <json>])'],
+        'update-dod': ['usage: swarm.ts update-dod --id <id> --status pass|fail [--result <json>]'],
+        'on-exit': ['usage: swarm.ts on-exit --id <id> --exit-code <int>'],
         publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
         'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
         list: ['usage: swarm.ts list'],
@@ -1589,6 +1695,13 @@ function main() {
                 status: optsRaw.status,
                 result: optsRaw.result,
                 resultFile: optsRaw.resultFile,
+            });
+            return;
+        }
+        if (cmd === 'on-exit') {
+            cmdOnExit({
+                id: optsRaw.id,
+                exitCode: optsRaw.exitCode,
             });
             return;
         }

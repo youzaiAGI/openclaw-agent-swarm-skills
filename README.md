@@ -1,411 +1,94 @@
-# openclaw-agent-swarm
+# OpenClaw Agent Swarm
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](code/src/swarm.ts)
+
+**OpenClaw Agent Swarm** is a unified execution layer for orchestrating AI coding agents (such as Codex, Claude Code, and Gemini) in isolated, asynchronous environments.
 
 English | [简体中文](docs/README.zh-CN.md)
 
-An OpenClaw skill for orchestrating coding agents with one unified runtime:
-- run `codex` and `claude` tasks in isolated `git worktree + tmux` environments
-- support both `interactive` and `batch` task modes in the same skill
-- attach new instructions to a running interactive task
-- track incremental status through heartbeat polling
-- continue finished tasks through guarded follow-up flows
-- support built-in DoD plus custom `dod.md` checks
+---
 
-This repository now ships a single skill:
-- `openclaw-agent-swarm`
+## 🚀 Key Features
 
-Both task modes are implemented by the same `swarm.js` entrypoint:
-- `interactive`: long-lived tmux session, supports `attach`
-- `batch`: non-interactive run in tmux, no mid-task `attach`
+- **Isolated Execution**: Automatically creates a dedicated Git Worktree and Branch for every task, ensuring zero interference.
+- **Asynchronous Scheduling**: Supports long-running background tasks (Batch mode) or real-time human-in-the-loop interaction (Interactive mode).
+- **Incremental Monitoring**: Provides a heartbeat polling mechanism that only reports changed task states.
+- **DoD Driven**: Built-in and extensible "Definition of Done" (DoD) checks to ensure high-quality code changes.
+- **Multi-Agent Support**: A unified CLI interface for Codex, Claude Code, and Gemini.
 
-## 0. Terminology
+---
 
-`DoD` means `Definition of Done`: the objective completion criteria a task must satisfy before it is considered complete.
+## 🏗️ Architecture at a Glance
 
-This project supports two DoD layers:
-- built-in DoD enforced by `swarm.ts`
-- task-specific DoD defined in `dod.md` and written back through `update-dod`
-
-Task states are fixed:
-- `running`
-- `pending`
-- `success`
-- `failed`
-- `stopped`
-
-## 1. Goal
-
-When OpenClaw needs to drive one or more engineering tasks asynchronously, this skill provides a controllable execution layer with isolation, visibility, and explicit task state.
-
-Design goals:
-- Async by default: `spawn` returns immediately
-- Isolation: one task, one worktree, one branch, one tmux session
-- Unified runtime: one skill handles both `interactive` and `batch`
-- Human-in-the-loop: add instructions with `attach` when interactive work is still running
-- Deterministic monitoring: `check --changes-only` reports only changed tasks
-- Extensible completion: built-in checks handle command-level gates, `dod.md` handles semantic acceptance
-
-## 2. Architecture
+The swarm ensures safe and controllable execution through multiple layers of isolation:
 
 ```mermaid
 flowchart LR
-    U[User] --> OC[OpenClaw Main Agent]
-    OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/scripts/swarm.js]
-
-    S --> T1[tmux session A]
-    S --> T2[tmux session B]
-    S --> T3[tmux session N]
-
-    T1 --> A1[Codex or Claude]
-    T2 --> A2[Codex or Claude]
-    T3 --> A3[Codex or Claude]
-
-    A1 --> W1[git worktree A]
-    A2 --> W2[git worktree B]
-    A3 --> W3[git worktree N]
-
-    S --> R[(~/.agents/agent-swarm/tasks/*.json)]
-    S --> L[(logs / prompts / exit files)]
-
-    HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
-    CK --> S
-    S --> R
+    Coordinator[Coordinator Agent] --> Swarm[Swarm Skill]
+    Swarm --> TaskA[Task A: Tmux + Worktree]
+    Swarm --> TaskB[Task B: Tmux + Worktree]
+    TaskA --> Agent[Claude/Codex/Gemini]
 ```
 
-## 3. End-to-End Flow
+---
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant OpenClaw
-    participant Swarm as swarm.js
-    participant Tmux
-    participant Agent as Codex or Claude
-    participant Registry as task registry
+## 🛠️ Quick Setup
 
-    User->>OpenClaw: "Create task A/B"
-    OpenClaw->>Swarm: spawn --repo ... --task ... --mode ...
-    Swarm->>Swarm: create worktree + branch
-    Swarm->>Tmux: new-session per task
-    Tmux->>Agent: start CLI
-    Swarm->>Registry: write task.json
-    Swarm-->>OpenClaw: return task id/session/worktree
-    OpenClaw-->>User: immediate async response
+### Prerequisites
+- **OS**: macOS or Linux
+- **Node.js**: >= 18
+- **Dependencies**: `git`, `tmux`, and at least one agent CLI (`codex`, `claude`, or `gemini`).
 
-    loop heartbeat tick
-        OpenClaw->>Swarm: check --changes-only
-        Swarm->>Registry: refresh changed states
-        Swarm-->>OpenClaw: changed tasks only
-    end
-
-    User->>OpenClaw: "Add instruction to task A"
-    OpenClaw->>Swarm: attach --id A --message ...
-    Swarm->>Tmux: send text into live session
-
-    User->>OpenClaw: "Validate dod.md"
-    OpenClaw->>Swarm: update-dod --id A --result-file ...
-
-    User->>OpenClaw: "Continue task A"
-    OpenClaw->>Swarm: spawn-followup --from A --worktree-mode new|reuse
-```
-
-## 4. Repository Layout
-
-```text
-.
-├── code/                                # source of truth
-│   ├── src/swarm.ts                     # TypeScript implementation
-│   ├── package.json                     # build toolchain
-│   └── tsconfig.json
-├── scripts/
-│   ├── build-skill.sh                   # build and sync runtime artifact
-│   ├── regression-swarm-concurrency.sh  # runtime regression script
-│   └── README.md
-├── skills/openclaw-agent-swarm/         # ship-ready skill payload
-│   ├── SKILL.md
-│   ├── scripts/swarm.js
-│   ├── scripts/check-agents.sh
-│   └── references/
-│       ├── dod.md
-│       └── state-format.md
-├── docs/
-│   └── README.zh-CN.md
-└── legacy/                              # old code and old docs kept for cleanup history
-```
-
-Build flow:
-- `code/src/swarm.ts` -> `skills/openclaw-agent-swarm/scripts/swarm.js`
-
-## 5. Core Behavior
-
-### 5.1 Task Model
-
-Tasks are stored in:
-- `~/.agents/agent-swarm/tasks/<task_id>.json`
-
-Key fields:
-- `id`, `mode`, `agent`, `status`
-- `repo`, `worktree`, `branch`, `base_branch`
-- `tmux_session`
-- `task`, `parent_task_id`
-- `required_tests`
-- `created_at`, `updated_at`, `last_activity_at`, `timeout_since`
-- `log`, `exit_file`, `exit_code`, `result_excerpt`
-- `dod`, `publish`, `pr`, `cancel`
-
-### 5.2 State Machine
-
-States:
-- `running`
-- `pending`
-- `success`
-- `failed`
-- `stopped`
-
-Rules:
-- `batch` converges from exit file and tmux liveness
-- `interactive` remains attachable while the session is alive
-- terminal tasks are re-evaluated for default DoD on refresh
-- `check --changes-only` is incremental and backed by `last-check.json`
-
-### 5.3 DoD
-
-Built-in DoD passes only if:
-- task status is terminal
-- worktree is clean
-- every command in `required_tests` exits `0`
-
-Custom DoD flow:
-- define semantic acceptance in `dod.md`
-- validate it outside the task runtime
-- call `update-dod` to write back `pass|fail`
-
-Conventions:
-- `dod.status` only allows `pass|fail`
-- system exceptions must be recorded in `dod.result.error`
-
-### 5.4 Follow-up and Worktree Reuse
-
-For follow-up on finished tasks:
-- do not silently `attach`
-- return follow-up choices instead
-- user can choose:
-  - `new`: create a new worktree and branch
-  - `reuse`: continue on the existing worktree if the guard allows it
-
-Reuse guard:
-- worktree exists and is still a git worktree
-- worktree is clean
-- parent tmux session is not alive
-- branch is still resolvable
-
-## 6. Quick Start
-
-Install the skill:
-
+### Installation
 ```bash
+# Clone the repository
 git clone https://github.com/youzaiAGI/openclaw-agent-swarm-skills.git
 cd openclaw-agent-swarm-skills
-cd code
-npm install
+
+# Build from source
+cd code && npm install && npm run build
 cd ..
+
+# Deploy the skill payload
 ./scripts/build-skill.sh
-mkdir -p "$HOME/.openclaw/skills"
-rm -rf "$HOME/.openclaw/skills/openclaw-agent-swarm"
-cp -R skills/openclaw-agent-swarm "$HOME/.openclaw/skills/openclaw-agent-swarm"
 ```
 
-Set skill root:
+---
 
-```bash
-SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
-```
+## 📖 Documentation Index
 
-Start one batch task:
+For detailed guides and references, please explore our documentation:
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn \
-  --repo /path/to/repo \
-  --mode batch \
-  --task "Implement feature X" \
-  --agent codex \
-  --required-test "npm test"
-```
+### 🏁 [Getting Started](docs/getting-started.md)
+Step-by-step instructions for installation, configuration, and running your first task.
 
-Check progress:
+### 🏛️ [Architecture](docs/architecture.md)
+In-depth look at how the swarm uses Git Worktree, Tmux, and local state for isolation and execution.
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
-```
+### 📜 [CLI Reference](docs/cli-reference.md)
+Complete manual for every subcommand and option available in the `swarm.js` tool.
 
-If the task uses `dod.md`, write the result back:
+### ✅ [DoD Workflow](docs/dod-workflow.md)
+Explanation of the "Definition of Done" process, including automated tests and semantic checks.
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" update-dod \
-  --id <task-id> \
-  --status pass \
-  --result '{"summary":"dod.md checks passed","error":""}'
-```
+### 🤖 [Agent Integration](docs/agent-integration.md)
+Guidelines for configuring and using different AI coding agents within the swarm.
 
-Publish the finished branch:
+### 🛠️ [Troubleshooting](docs/troubleshooting.md)
+Common issues, error messages, and their corresponding solutions.
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish --id <task-id> --auto-pr
-```
+---
 
-## 7. Command Usage
+## 🤝 Contributing
 
-Set skill root:
+Contributions are welcome! If you're modifying the core logic, please remember:
+1. Edit the TypeScript source in `code/src/swarm.ts`.
+2. Run `npm run build` to synchronize the compiled JavaScript.
+3. Verify your changes using the provided regression scripts in `scripts/`.
 
-```bash
-SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
-```
+---
 
-Main entrypoint:
+## 📄 License
 
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
-```
-
-`spawn`
-
-Use `spawn` to create a new task in a new worktree. This is the primary entrypoint for both `batch` and `interactive`.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn \
-  --repo /path/to/repo \
-  --mode batch \
-  --task "Implement custom template feature" \
-  --agent codex \
-  --required-test "npm test"
-```
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn \
-  --repo /path/to/repo \
-  --mode interactive \
-  --task "Investigate and patch bug Y" \
-  --agent claude
-```
-
-`attach`
-
-Use `attach` only for a running `interactive` task. It sends more instructions into the live tmux session.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" attach \
-  --id <task-id> \
-  --message "Prioritize the API layer first"
-```
-
-`spawn-followup`
-
-Use `spawn-followup` after a task has already converged and you want to continue from it.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
-  --from <task-id> \
-  --task "Address review feedback" \
-  --worktree-mode new
-```
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
-  --from <task-id> \
-  --task "Continue on the same branch" \
-  --worktree-mode reuse
-```
-
-`status` and `check`
-
-Use `status` for one task lookup. Use `check --changes-only` for polling or heartbeat-driven updates.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
-node "$SKILL_ROOT/scripts/swarm.js" status --query keyword
-node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
-```
-
-`update-dod`
-
-Use `update-dod` after your own `dod.md` validation finishes.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" update-dod \
-  --id <task-id> \
-  --result-file /path/to/dod-result.json
-```
-
-`cancel`
-
-Use `cancel` when you want to stop a running task and converge it to `stopped`.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" cancel \
-  --id <task-id> \
-  --reason "manual stop"
-```
-
-`publish` and `create-pr`
-
-Use `publish` after task completion and DoD pass. Use `create-pr` when you want explicit PR creation instead of `publish --auto-pr`.
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" publish \
-  --id <task-id> \
-  --auto-pr
-```
-
-```bash
-node "$SKILL_ROOT/scripts/swarm.js" create-pr \
-  --id <task-id>
-```
-
-## 8. Heartbeat Integration
-
-Configure polling in OpenClaw heartbeat with the shipped wrapper:
-
-```bash
-bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
-```
-
-This wrapper uses `flock` so only one check cycle runs at a time.
-
-Recommended use:
-- run from OpenClaw heartbeat
-- use `check --changes-only` semantics for incremental reporting
-
-## 9. Natural Language Mapping
-
-Suggested intent mapping:
-- "Create tasks in parallel" -> `spawn`
-- "Check progress" -> `status`
-- "Add instruction to this task" -> `attach`
-- "Cancel this task" -> `cancel --id`
-- "Continue this finished task" -> `spawn-followup`
-- "Check changes only" -> `check --changes-only`
-- "Publish this finished task" -> `publish --auto-pr`
-- "Create PR for this task" -> `create-pr`
-
-Agent selection in chat is explicit:
-- "Use codex for this task" -> `spawn --agent codex`
-- "Use claude for this task" -> `spawn --agent claude`
-
-## 10. Requirements
-
-- macOS or Linux
-- Node.js `>= 18`
-- `git`
-- `tmux`
-- at least one of `codex` or `claude`
-
-The target path must already be a git repository.
-
-## 11. Safety Notes
-
-- The runtime is designed for trusted local development environments.
-- Background task logs may contain code and context; apply your own retention policy.
-- Generated `.js` files under `skills/` are runtime artifacts and should not be edited directly.
-
-## 12. Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=youzaiAGI/openclaw-agent-swarm-skills&type=Date)](https://www.star-history.com/#youzaiAGI/openclaw-agent-swarm-skills&Date)
+This project is licensed under the [MIT License](LICENSE).

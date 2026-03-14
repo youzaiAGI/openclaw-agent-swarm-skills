@@ -14,6 +14,7 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1;
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
+command -v gemini >/dev/null 2>&1 || { echo "ERROR: gemini is required" >&2; exit 1; }
 
 # policy knobs (script-side external timeout control)
 BATCH_RUNNING_KILL_SEC=180
@@ -33,7 +34,7 @@ trap cleanup EXIT
 
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
-echo "[INFO] workload: 8 tasks (codex/claude x batch/interactive x read/write)"
+echo "[INFO] workload: 12 tasks (codex/claude/gemini x batch/interactive x read/write)"
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require stopped"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
@@ -48,7 +49,7 @@ git -C "$TMP_REPO" add README.md
 git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
-for agent in codex claude; do
+for agent in codex claude gemini; do
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "ro" "-" "-" \
     "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
@@ -56,9 +57,12 @@ for agent in codex claude; do
   if [[ "$agent" == "codex" ]]; then
     batch_file="REG_BATCH_CDX.md"
     batch_commit="test: codex batch write"
-  else
+  elif [[ "$agent" == "claude" ]]; then
     batch_file="REG_BATCH_CLD.md"
     batch_commit="test: claude batch write"
+  else
+    batch_file="REG_BATCH_GMN.md"
+    batch_commit="test: gemini batch write"
   fi
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -79,6 +83,7 @@ declare -a BATCH_IDS=()
 declare -a INTERACTIVE_IDS=()
 declare -a SPAWN_PIDS=()
 declare -a BATCH_WRITE_CASES=()
+declare -a WRITE_IDS=()
 
 i=0
 while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
@@ -92,6 +97,9 @@ while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
   fi
   if [[ "$mode" == "batch" && "$kind" == "write" ]]; then
     BATCH_WRITE_CASES+=("${task_id}|${expected_file}|${expected_msg}")
+  fi
+  if [[ "$kind" == "write" ]]; then
+    WRITE_IDS+=("$task_id")
   fi
 
   (
@@ -136,6 +144,18 @@ const d = JSON.parse(process.env.STATUS_INPUT_JSON || "{}");
 const id = String(process.env.TARGET_ID || "");
 const t = (d.tasks || []).find(x => String(x.id || "") === id);
 process.stdout.write(String((t && t.status) || "missing"));
+'
+}
+
+dod_status_of() {
+  local json="$1"
+  local id="$2"
+  STATUS_INPUT_JSON="$json" TARGET_ID="$id" node -e '
+const d = JSON.parse(process.env.STATUS_INPUT_JSON || "{}");
+const id = String(process.env.TARGET_ID || "");
+const t = (d.tasks || []).find(x => String(x.id || "") === id);
+const dod = t && t.dod && typeof t.dod === "object" ? t.dod : {};
+process.stdout.write(String(dod.status || "missing"));
 '
 }
 
@@ -216,6 +236,24 @@ validate_task_file_and_commit() {
   fi
   echo "[OK] $task_id file+commit verified"
   return 0
+}
+
+validate_task_has_commit() {
+  local task_id="$1"
+  local worktree
+  worktree="$(get_task_worktree "$task_id" || true)"
+  if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+    echo "[ERROR] worktree missing for $task_id"
+    return 1
+  fi
+  local commit_count
+  commit_count="$(git -C "$worktree" rev-list --count HEAD 2>/dev/null || echo 0)"
+  if [[ "$commit_count" =~ ^[0-9]+$ ]] && (( commit_count >= 2 )); then
+    echo "[OK] $task_id commit count verified: $commit_count"
+    return 0
+  fi
+  echo "[ERROR] expected extra commit for $task_id, got commit_count=$commit_count"
+  return 1
 }
 
 cancel_task() {
@@ -441,12 +479,33 @@ echo "[SUMMARY] batch_pass=${batch_pass_count}/${#BATCH_IDS[@]} batch_fail=${bat
 echo "[SUMMARY] interactive_pass=${interactive_pass_count}/${#INTERACTIVE_IDS[@]} interactive_fail=${interactive_fail_count}/${#INTERACTIVE_IDS[@]}"
 echo "[SUMMARY] total_pass=${total_pass}/${#TASK_IDS[@]} total_fail=${total_fail}/${#TASK_IDS[@]}"
 json_end="$(node "$SWARM_JS" check --json)"
+
+# 4) all tasks must have DoD pass
+dod_fail=0
+for id in "${TASK_IDS[@]}"; do
+  dod_st="$(dod_status_of "$json_end" "$id")"
+  if [[ "$dod_st" != "pass" ]]; then
+    echo "[ERROR] DoD not pass: $id dod=$dod_st"
+    dod_fail=1
+  else
+    echo "[OK] DoD pass: $id"
+  fi
+done
+
+# 5) all write tasks must have at least one extra commit
+write_fail=0
+for id in "${WRITE_IDS[@]}"; do
+  if ! validate_task_has_commit "$id"; then
+    write_fail=1
+  fi
+done
+
 for id in "${TASK_IDS[@]}"; do
   st="$(status_of "$json_end" "$id")"
   echo "[SUMMARY][CASE] task=$id final_status=$st"
 done
 
-if (( batch_fail != 0 || interactive_fail != 0 )); then
+if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 )); then
   cancel_non_terminal_tasks
   echo "[FAIL] regression failed"
   exit 1
