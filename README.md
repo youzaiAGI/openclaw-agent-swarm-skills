@@ -55,8 +55,17 @@ You must specify a target **Git repository directory**.
 ### 3. Definition of Done (DoD)
 A task isn't finished until the DoD is satisfied.
 *   **Built-in**: Swarm checks if the worktree is clean and if the specified test commands exit with code 0.
-*   **Semantic (`dod.md`)**: You can ask the agent to verify complex rules defined in a `dod.md` file within the repository.
-*   **Prompt**: "Verify the DoD for task `auth-fix`. If tests pass and `dod.md` criteria are met, publish the branch."
+*   **Semantic Check (`dod.md`)**: For complex logic, you can define task-specific acceptance criteria in a `docs/dod.md` file within the repository.
+
+**Example `docs/dod.md`:**
+```markdown
+## Semantic Acceptance
+- [ ] All new functions must have JSDoc comments.
+- [ ] No hardcoded API keys in the code.
+- [ ] The README in the worktree must be updated.
+```
+
+*   **Prompt**: "Check the DoD for task `auth-fix`. If tests pass and all semantic rules in `docs/dod.md` are met, mark it as passed."
 
 ---
 
@@ -70,11 +79,12 @@ A task isn't finished until the DoD is satisfied.
 
 ## 📂 Documentation Reference
 
-*   [🚀 Getting Started Guide](docs/getting-started.md) - Step-by-step setup and first task.
+*   [🏗️ Development Guide](docs/development.md) - For developers wanting to build or modify the source.
+*   [🤝 Contributing](CONTRIBUTING.md) - Guidelines for reporting bugs and submitting code.
 *   [🏛️ Architecture Deep Dive](docs/architecture.md) - Detailed design of the isolation and execution model.
 *   [📜 CLI Full Manual](docs/cli-reference.md) - For advanced users and manual Shell execution.
 *   [✅ Definition of Done Guide](docs/dod-workflow.md) - Deep dive into built-in vs semantic checks.
 *   [🤖 Agent Integration](docs/agent-integration.md) - How we handle different AI CLI tools.
 *   [🛠️ Troubleshooting](docs/troubleshooting.md) - Solving common issues (locks, sessions, etc.).
-*   [📝 Technical Blog Post](docs/blog-openclaw-agent-swarm.md) - A deep dive into the swarm's capabilities (Great for sharing!).
+*   [📝 Technical Blog Post](docs/blog-openclaw-agent-swarm.md) - A deep dive into the swarm's capabilities.
 *   [⚙️ State & JSON Format](skills/openclaw-agent-swarm/references/state-format.md) - Technical spec for developers.

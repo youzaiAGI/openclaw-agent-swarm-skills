@@ -28,6 +28,17 @@ Status model (must treat as two independent axes):
 - `task.dod.status` is acceptance state: `pass | fail` (or missing before evaluation/writeback).
 - DoD changes do not rewrite `task.status`; execution status changes do not imply DoD pass.
 
+Operational rules (must follow):
+- Prefer `status --id <task_id>` for accurate single-task refresh; plain `status` only returns latest summaries.
+- Default DoD is triggered only on specific terminal status transitions, not on every `check/status` call.
+- `update-dod` only updates `task.dod`; it does not update `task.status`.
+- `publish` requires `task.dod.status=pass` and mode-allowed status (`batch=success`, `interactive=stopped`).
+- `spawn-followup new|reuse` both reuse parent worktree.
+- `spawn-followup`: mode always follows parent task mode; do not rely on `--mode`.
+- `spawn-followup` agent rules: `new` can specify agent (default parent agent), `reuse` must match parent agent.
+- `attach` is only for non-terminal interactive tasks; successful attach writes `task.status=running`.
+- Default DoD includes: mode-allowed terminal status, worktree clean, and all `required_tests` passing (each test has timeout).
+
 
 How to evaluate DoD:
 - Spawn/spawn-followup does not evaluate DoD; default `task.dod` is empty `{}`.
@@ -59,6 +70,82 @@ How to update `task.json` DoD:
 
 ```bash
 node "scripts/swarm.js" <subcommand> ...
+```
+
+## Quick Examples
+
+Spawn a new batch task:
+
+```bash
+node "scripts/swarm.js" spawn \
+  --repo /path/to/repo \
+  --mode batch \
+  --agent codex \
+  --task "Implement feature X and commit" \
+  --required-test "npm test"
+```
+
+Spawn a new interactive task:
+
+```bash
+node "scripts/swarm.js" spawn \
+  --repo /path/to/repo \
+  --mode interactive \
+  --agent claude \
+  --task "Investigate bug Y and keep session open"
+```
+
+Prefer single-task status refresh:
+
+```bash
+node "scripts/swarm.js" status --id <task_id>
+```
+
+Attach instructions to a running interactive task:
+
+```bash
+node "scripts/swarm.js" attach \
+  --id <task_id> \
+  --message "Prioritize API layer first, then update tests"
+```
+
+Cancel a running task:
+
+```bash
+node "scripts/swarm.js" cancel \
+  --id <task_id> \
+  --reason "manual stop"
+```
+
+Follow-up from a terminal task (both modes reuse parent worktree):
+
+```bash
+node "scripts/swarm.js" spawn-followup \
+  --from <task_id> \
+  --worktree-mode new \
+  --task "Address review comments"
+```
+
+```bash
+node "scripts/swarm.js" spawn-followup \
+  --from <task_id> \
+  --worktree-mode reuse \
+  --task "Continue with previous conversation context"
+```
+
+Write back DoD from external `dod.md` validation:
+
+```bash
+node "scripts/swarm.js" update-dod \
+  --id <task_id> \
+  --status pass \
+  --result '{"summary":"dod.md checks passed","error":""}'
+```
+
+Publish only when mode/status is allowed and DoD is pass:
+
+```bash
+node "scripts/swarm.js" publish --id <task_id> --auto-pr
 ```
 
 Spawn:

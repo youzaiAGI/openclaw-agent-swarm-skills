@@ -792,7 +792,13 @@ function buildManualPrUrl(forgeInfo: AnyObj, sourceBranch: string, targetBranch:
 }
 
 function ensurePublishable(task: AnyObj): void {
-  if (task.status !== 'success') fail(`task is not success: ${task.status}`);
+  const mode = normalizeMode(task.mode);
+  const status = String(task.status || '');
+  const statusAllowed = (mode === MODE_INTERACTIVE && status === 'stopped')
+    || (mode === MODE_BATCH && status === 'success');
+  if (!statusAllowed) {
+    fail(`task is not publishable for mode/status: mode=${mode} status=${status || 'unknown'}`);
+  }
   const dod = task.dod && typeof task.dod === 'object' ? task.dod : {};
   if (!dodPassed(dod)) fail(`task DoD not pass: ${(dod.result || {}).reason || 'unknown'}`);
 }
@@ -1691,7 +1697,6 @@ function main(): void {
         from: String(optsRaw.from),
         task: String(optsRaw.task),
         worktreeMode: String(optsRaw.worktreeMode),
-        mode: optsRaw.mode,
         agent: optsRaw.agent,
         name: optsRaw.name,
         requiredTest: optsRaw.requiredTest,
