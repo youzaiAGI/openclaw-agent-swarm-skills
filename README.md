@@ -2,7 +2,7 @@
 
 English | [简体中文](docs/README.zh-CN.md)
 
-An OpenClaw skill for orchestrating coding agents with one unified runtime:
+A swarm skill for orchestrating coding agents from OpenClaw, Codex, Claude Code, or similar runtimes:
 - run `codex` and `claude` tasks in isolated `git worktree + tmux` environments
 - support both `interactive` and `batch` task modes in the same skill
 - attach new instructions to a running interactive task
@@ -34,7 +34,7 @@ Task states are fixed:
 
 ## 1. Goal
 
-When OpenClaw needs to drive one or more engineering tasks asynchronously, this skill provides a controllable execution layer with isolation, visibility, and explicit task state.
+When a coordinator agent/runtime needs to drive one or more engineering tasks asynchronously, this skill provides a controllable execution layer with isolation, visibility, and explicit task state.
 
 Design goals:
 - Async by default: `spawn` returns immediately
@@ -48,7 +48,7 @@ Design goals:
 
 ```mermaid
 flowchart LR
-    U[User] --> OC[OpenClaw Main Agent]
+    U[User] --> OC[Coordinator Agent]
     OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/scripts/swarm.js]
 
     S --> T1[tmux session A]
@@ -66,7 +66,7 @@ flowchart LR
     S --> R[(~/.agents/agent-swarm/tasks/*.json)]
     S --> L[(logs / prompts / exit files)]
 
-    HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
+    HB[Runtime HEARTBEAT] --> CK[check-agents.sh]
     CK --> S
     S --> R
 ```
@@ -76,36 +76,36 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant User
-    participant OpenClaw
+    participant Coordinator
     participant Swarm as swarm.js
     participant Tmux
     participant Agent as Codex or Claude
     participant Registry as task registry
 
-    User->>OpenClaw: "Create task A/B"
-    OpenClaw->>Swarm: spawn --repo ... --task ... --mode ...
+    User->>Coordinator: "Create task A/B"
+    Coordinator->>Swarm: spawn --repo ... --task ... --mode ...
     Swarm->>Swarm: create worktree + branch
     Swarm->>Tmux: new-session per task
     Tmux->>Agent: start CLI
     Swarm->>Registry: write task.json
-    Swarm-->>OpenClaw: return task id/session/worktree
-    OpenClaw-->>User: immediate async response
+    Swarm-->>Coordinator: return task id/session/worktree
+    Coordinator-->>User: immediate async response
 
     loop heartbeat tick
-        OpenClaw->>Swarm: check --changes-only
+        Coordinator->>Swarm: check --changes-only
         Swarm->>Registry: refresh changed states
-        Swarm-->>OpenClaw: changed tasks only
+        Swarm-->>Coordinator: changed tasks only
     end
 
-    User->>OpenClaw: "Add instruction to task A"
-    OpenClaw->>Swarm: attach --id A --message ...
+    User->>Coordinator: "Add instruction to task A"
+    Coordinator->>Swarm: attach --id A --message ...
     Swarm->>Tmux: send text into live session
 
-    User->>OpenClaw: "Validate dod.md"
-    OpenClaw->>Swarm: update-dod --id A --result-file ...
+    User->>Coordinator: "Validate dod.md"
+    Coordinator->>Swarm: update-dod --id A --status pass --result ...
 
-    User->>OpenClaw: "Continue task A"
-    OpenClaw->>Swarm: spawn-followup --from A --worktree-mode new|reuse
+    User->>Coordinator: "Continue task A"
+    Coordinator->>Swarm: spawn-followup --from A --worktree-mode new|reuse
 ```
 
 ## 4. Repository Layout
@@ -323,6 +323,7 @@ Use `status` for one task lookup. Use `check --changes-only` for polling or hear
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
 node "$SKILL_ROOT/scripts/swarm.js" status --query keyword
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" list
 ```
 
 `update-dod`
@@ -332,7 +333,8 @@ Use `update-dod` after your own `dod.md` validation finishes.
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
   --id <task-id> \
-  --result-file /path/to/dod-result.json
+  --status pass \
+  --result '{"summary":"dod.md checks passed","error":""}'
 ```
 
 `cancel`
@@ -362,7 +364,7 @@ node "$SKILL_ROOT/scripts/swarm.js" create-pr \
 
 ## 8. Heartbeat Integration
 
-Configure polling in OpenClaw heartbeat with the shipped wrapper:
+Configure polling in your runtime heartbeat with the shipped wrapper:
 
 ```bash
 bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
@@ -371,8 +373,14 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 This wrapper uses `flock` so only one check cycle runs at a time.
 
 Recommended use:
-- run from OpenClaw heartbeat
+- run from your runtime heartbeat
 - use `check --changes-only` semantics for incremental reporting
+
+If your runtime uses a `HEARTBEAT.md`, ensure it includes:
+
+```bash
+bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
+```
 
 ## 9. Natural Language Mapping
 

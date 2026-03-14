@@ -2,7 +2,7 @@
 
 [English](../README.md) | 简体中文
 
-一个用于 OpenClaw 的多 Agent 编排 Skill：
+一个可供 OpenClaw、Codex、Claude Code 等运行时调用的多 Agent 编排 Skill：
 - 用统一运行时管理 `codex` 和 `claude` 任务
 - 每个任务独立 `git worktree + tmux session`
 - 同时支持 `interactive` 与 `batch` 两种模式
@@ -34,7 +34,7 @@
 
 ## 1. 项目目标
 
-当 OpenClaw 需要异步推进一个或多个工程任务时，这个 skill 提供一个可控、可追踪、可回写状态的执行层。
+当任意协调型 Agent/运行时需要异步推进一个或多个工程任务时，这个 skill 提供一个可控、可追踪、可回写状态的执行层。
 
 核心设计目标：
 - 异步：`spawn` 立即返回，不阻塞主对话
@@ -48,7 +48,7 @@
 
 ```mermaid
 flowchart LR
-    U[用户] --> OC[OpenClaw 主 Agent]
+    U[用户] --> OC[协调主 Agent]
     OC --> S[openclaw-agent-swarm\nskills/openclaw-agent-swarm/scripts/swarm.js]
 
     S --> T1[tmux session A]
@@ -66,7 +66,7 @@ flowchart LR
     S --> R[(~/.agents/agent-swarm/tasks/*.json)]
     S --> L[(logs / prompts / exit files)]
 
-    HB[OpenClaw HEARTBEAT] --> CK[check-agents.sh]
+    HB[运行时 HEARTBEAT] --> CK[check-agents.sh]
     CK --> S
     S --> R
 ```
@@ -76,36 +76,36 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant User as 用户
-    participant OpenClaw
+    participant Coordinator
     participant Swarm as swarm.js
     participant Tmux
     participant Agent as Codex 或 Claude
     participant Registry as task registry
 
-    User->>OpenClaw: "创建任务 A/B"
-    OpenClaw->>Swarm: spawn --repo ... --task ... --mode ...
+    User->>Coordinator: "创建任务 A/B"
+    Coordinator->>Swarm: spawn --repo ... --task ... --mode ...
     Swarm->>Swarm: 创建 worktree + branch
     Swarm->>Tmux: 为每个任务启动 new-session
     Tmux->>Agent: 启动 CLI
     Swarm->>Registry: 写入 task.json
-    Swarm-->>OpenClaw: 返回 task id/session/worktree
-    OpenClaw-->>User: 立即异步响应
+    Swarm-->>Coordinator: 返回 task id/session/worktree
+    Coordinator-->>User: 立即异步响应
 
     loop 每次 heartbeat
-        OpenClaw->>Swarm: check --changes-only
+        Coordinator->>Swarm: check --changes-only
         Swarm->>Registry: 刷新变化状态
-        Swarm-->>OpenClaw: 只返回 changed tasks
+        Swarm-->>Coordinator: 只返回 changed tasks
     end
 
-    User->>OpenClaw: "给任务 A 补充要求"
-    OpenClaw->>Swarm: attach --id A --message ...
+    User->>Coordinator: "给任务 A 补充要求"
+    Coordinator->>Swarm: attach --id A --message ...
     Swarm->>Tmux: 向 live session 发送文本
 
-    User->>OpenClaw: "校验 dod.md"
-    OpenClaw->>Swarm: update-dod --id A --result-file ...
+    User->>Coordinator: "校验 dod.md"
+    Coordinator->>Swarm: update-dod --id A --status pass --result ...
 
-    User->>OpenClaw: "继续任务 A"
-    OpenClaw->>Swarm: spawn-followup --from A --worktree-mode new|reuse
+    User->>Coordinator: "继续任务 A"
+    Coordinator->>Swarm: spawn-followup --from A --worktree-mode new|reuse
 ```
 
 ## 4. 目录结构
@@ -323,6 +323,7 @@ node "$SKILL_ROOT/scripts/swarm.js" spawn-followup \
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task-id>
 node "$SKILL_ROOT/scripts/swarm.js" status --query keyword
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
+node "$SKILL_ROOT/scripts/swarm.js" list
 ```
 
 `update-dod`
@@ -332,7 +333,8 @@ node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
   --id <task-id> \
-  --result-file /path/to/dod-result.json
+  --status pass \
+  --result '{"summary":"dod.md 检查通过","error":""}'
 ```
 
 `cancel`
@@ -362,7 +364,7 @@ node "$SKILL_ROOT/scripts/swarm.js" create-pr \
 
 ## 8. Heartbeat 集成
 
-在 OpenClaw 的 heartbeat 中配置以下命令：
+在你的运行时 heartbeat 中配置以下命令：
 
 ```bash
 bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
@@ -371,10 +373,16 @@ bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
 这个 wrapper 使用 `flock`，保证同一时刻只有一个检查周期在运行。
 
 推荐用法：
-- 由 OpenClaw heartbeat 周期调用
+- 由运行时 heartbeat 周期调用
 - 配合 `check --changes-only` 做增量状态上报
 
-## 9. OpenClaw 自然语言映射建议
+如果运行时使用 `HEARTBEAT.md`，请确保包含以下命令：
+
+```bash
+bash "$HOME/.openclaw/skills/openclaw-agent-swarm/scripts/check-agents.sh"
+```
+
+## 9. 自然语言映射建议
 
 推荐映射：
 - “并发创建任务” -> `spawn`

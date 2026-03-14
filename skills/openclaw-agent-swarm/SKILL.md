@@ -3,7 +3,7 @@ name: openclaw-agent-swarm
 description: Unified swarm skill for interactive and batch coding tasks with git worktree + tmux, incremental check, and DoD updates.
 ---
 
-# OpenClaw Agent Swarm
+# Agent Swarm
 
 Use this skill to run coding tasks asynchronously in isolated worktrees.
 
@@ -15,25 +15,24 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 4. `attach` is only allowed for running `interactive` tasks.
 5. Task status set is fixed: `running | pending | success | failed | stopped`.
 6. `check --changes-only` must only return changed tasks.
-7. DoD is checked after task reaches terminal status and can be updated by OpenClaw.
+7. DoD is checked after task reaches terminal status and can be updated by the caller agent/runtime.
 
 ## DoD Workflow
 
 References:
 - `references/dod.md`
 
-Dual track:
-- OpenClaw reads `dod.md` and runs markdown-defined checks.
-- `swarm.ts` enforces command checks from `required_tests` passed at spawn.
+How to evaluate DoD:
+- Default DoD (from `swarm.ts`): task status must be `success` or `stopped`, and worktree must be clean.
+- Extra DoD method 1: put semantic acceptance rules in `references/dod.md` (for example: must push, must have new commits).
+- Extra DoD method 2: pass repeated `--required-test "<cmd>"` at `spawn`; all commands must exit with code `0`.
+- Each required test result is recorded in `task.dod.result.checks`.
 
-Default DoD conditions:
-- task is terminal (`success|failed|stopped`)
-- worktree is clean
-
-DoD writeback:
-- OpenClaw calls `update-dod` to update task DoD.
-- DoD schema is `status: pass|fail` and `result` object.
-- System exceptions are recorded in `dod.result.error`.
+How to update `task.json` DoD:
+- Caller runtime writes DoD back by calling `update-dod`.
+- Writeback target is `task.dod` in `~/.agents/agent-swarm/tasks/<task_id>.json`.
+- Payload schema is `status: pass|fail` and `result` object.
+- If DoD checking fails due to system exception, write details into `result.error`.
 
 ## Global State
 
@@ -47,7 +46,7 @@ DoD writeback:
 ## Commands
 
 ```bash
-SKILL_ROOT="$HOME/.openclaw/skills/openclaw-agent-swarm"
+SKILL_ROOT="<path-to-installed-skill>/openclaw-agent-swarm"
 node "$SKILL_ROOT/scripts/swarm.js" <subcommand> ...
 ```
 
@@ -85,11 +84,12 @@ Cancel:
 node "$SKILL_ROOT/scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
 ```
 
-Check and status:
+Check, status, and list:
 
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" check --changes-only
 node "$SKILL_ROOT/scripts/swarm.js" status --id <task_id>
+node "$SKILL_ROOT/scripts/swarm.js" list
 ```
 
 Update DoD:
@@ -97,7 +97,8 @@ Update DoD:
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" update-dod \
   --id <task_id> \
-  --result-file <dod_result.json>
+  --status pass \
+  --result '{"summary":"dod.md checks passed","error":""}'
 ```
 
 Publish and PR:
@@ -108,6 +109,12 @@ node "$SKILL_ROOT/scripts/swarm.js" create-pr --id <task_id>
 ```
 
 Heartbeat wrapper:
+
+```bash
+bash "$SKILL_ROOT/scripts/check-agents.sh"
+```
+
+If your runtime uses a `HEARTBEAT.md`, ensure it includes:
 
 ```bash
 bash "$SKILL_ROOT/scripts/check-agents.sh"

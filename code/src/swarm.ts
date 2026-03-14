@@ -22,6 +22,7 @@ const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SH
 const MODE_INTERACTIVE = 'interactive';
 const MODE_BATCH = 'batch';
 const TERMINAL_STATUSES = new Set(['success', 'failed', 'stopped']);
+const DEFAULT_DOD_ALLOWED_STATUSES = new Set(['success', 'stopped']);
 const INTERACTIVE_LOG_QUIET_SEC = 60;
 const BATCH_TIMEOUT_SEC = 10_800;
 const INTERACTIVE_PENDING_TIMEOUT_SEC = 10_800;
@@ -637,6 +638,10 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
     result.reason = `status_not_terminal:${status || 'unknown'}`;
     return dod;
   }
+  if (!DEFAULT_DOD_ALLOWED_STATUSES.has(status)) {
+    result.reason = `status_not_allowed_for_default_dod:${status || 'unknown'}`;
+    return dod;
+  }
   const sp = run(['git', 'status', '--porcelain'], worktree, false);
   result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
   result.checks.push({ name: 'worktree_clean', pass: result.worktree_clean });
@@ -1246,15 +1251,8 @@ function cmdList(): void {
 }
 
 function parseDodPayload(opts: AnyObj): AnyObj {
-  if (opts.resultFile) {
-    const p = path.resolve(String(opts.resultFile));
-    if (!fs.existsSync(p)) fail(`result file not found: ${p}`);
-    const data = loadJson<AnyObj | null>(p, null);
-    if (!data || typeof data !== 'object') fail(`invalid result file json: ${p}`);
-    return data;
-  }
   const status = String(opts.status || '').toLowerCase();
-  if (!status) fail('update-dod requires --result-file <json> or --status <pass|fail>');
+  if (!status) fail('update-dod requires --status <pass|fail> [--result <json>]');
   const payload: AnyObj = {
     status,
     result: {},
@@ -1535,7 +1533,7 @@ function showCommandHelp(cmd: string): void {
     cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
     check: ['usage: swarm.ts check [--changes-only]'],
     status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
-    'update-dod': ['usage: swarm.ts update-dod --id <id> (--result-file <json> | --status pass|fail [--result <json>])'],
+    'update-dod': ['usage: swarm.ts update-dod --id <id> --status pass|fail [--result <json>]'],
     publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
     'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
     list: ['usage: swarm.ts list'],
