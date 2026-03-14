@@ -12,10 +12,11 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 1. Refuse execution when target path is not a git repository.
 2. Require local tools before spawn: `git`, `tmux`, and at least one of `codex` / `claude`.
 3. Default mode is `batch`; mode can be `interactive` or `batch`.
-4. `attach` is only allowed for running `interactive` tasks.
+4. `attach` is only allowed for non-terminal `interactive` tasks.
 5. Task status set is fixed: `running | pending | success | failed | stopped`.
 6. `check --changes-only` must only return changed tasks.
-7. DoD is checked after task reaches terminal status and can be updated by the caller agent/runtime.
+7. `check/status` must include fallback: if task is non-terminal but tmux session is gone, converge task to `stopped`.
+8. DoD is checked after task reaches terminal status and can be updated by the caller agent/runtime.
 
 ## DoD Workflow
 
@@ -82,6 +83,10 @@ Attach:
 ```bash
 node "$SKILL_ROOT/scripts/swarm.js" attach --id <task_id> --message "<message>"
 ```
+
+Behavior:
+- if task status in `task.json` is terminal, reject attach immediately
+- if task status is non-terminal, send message and set status to `running`
 
 Cancel:
 

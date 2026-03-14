@@ -23,6 +23,8 @@ const REMINDER_MAX = 3;
 const REMINDER_INTERVAL_SEC = 3600;
 const DOD_PASS = 'pass';
 const DOD_FAIL = 'fail';
+const SELF_NODE_BIN = process.execPath;
+const SELF_SCRIPT_PATH = path.resolve(process.argv[1] || __filename);
 function printJson(payload) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -297,10 +299,14 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:branch_unresolvable', {}];
     return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
-function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
+function buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath) {
     const promptQ = shellQuote(promptPath);
     const logQ = shellQuote(logPath);
     const exitQ = shellQuote(exitPath);
+    const nodeQ = shellQuote(SELF_NODE_BIN);
+    const scriptQ = shellQuote(SELF_SCRIPT_PATH);
+    const taskQ = shellQuote(taskId);
+    const onExitCmd = `${nodeQ} ${scriptQ} on-exit --id ${taskQ} --exit-code "$ec" >> ${logQ} 2>&1 || true;`;
     let interactiveBase = '';
     let batchBase = '';
     if (agent === 'codex') {
@@ -321,6 +327,7 @@ function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
             `${batchBase} >> ${logQ} 2>&1;`,
             'ec=$?;',
             `echo "$ec" > ${exitQ};`,
+            onExitCmd,
         ].join(' ');
     }
     return [
@@ -328,6 +335,7 @@ function buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath) {
         `${interactiveBase};`,
         'ec=$?;',
         `echo "$ec" > ${exitQ};`,
+        onExitCmd,
         'exec bash',
     ].join(' ');
 }
@@ -515,7 +523,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId =
         fs.writeFileSync(exitPath, '', 'utf-8');
         fs.rmSync(exitPath, { force: true });
     }
-    const cmd = buildAgentStartCommand(agent, mode, promptPath, logPath, exitPath);
+    const cmd = buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath);
     tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
     if (mode === MODE_INTERACTIVE) {
         run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
@@ -655,6 +663,10 @@ function buildDodFailedByStatus(task, status) {
 function applyDodOnStatusTransition(task, oldStatus, nextStatus, mode) {
     if (oldStatus === nextStatus)
         return;
+    if (mode === MODE_INTERACTIVE && nextStatus === 'failed') {
+        task.dod = buildDodFailedByStatus(task, nextStatus);
+        return;
+    }
     if (mode === MODE_INTERACTIVE && nextStatus === 'stopped') {
         task.dod = evaluateDefaultDod(task);
         return;
@@ -860,11 +872,11 @@ function updateStatus(task, opts) {
             convergedReason = 'tmux_not_alive_interactive';
         }
         else if (exitFile && fs.existsSync(exitFile)) {
-            // Interactive mode converges to stopped once agent exits unexpectedly.
+            // Interactive mode should not normally emit exit file; if it does, treat as failed.
             const codeText = fs.readFileSync(exitFile, 'utf-8').trim() || '1';
             const code = Number.parseInt(codeText, 10);
             task.exit_code = Number.isNaN(code) ? 1 : code;
-            next = 'stopped';
+            next = 'failed';
             convergedReason = `interactive_exit_code:${task.exit_code}`;
         }
         else {
@@ -1058,6 +1070,16 @@ function cmdAttach(opts) {
     const msg = String(opts.message || '').trim();
     if (!msg)
         fail('message is empty');
+    const status = String(task.status || 'unknown');
+    if (isTerminalStatus(status)) {
+        printJson({
+            ok: false,
+            id: opts.id,
+            error: `task_already_terminal:${status}`,
+            requires_confirmation: false,
+        });
+        return;
+    }
     const mode = normalizeMode(task.mode);
     if (!modeSupportsAttach(mode)) {
         printJson({
@@ -1073,37 +1095,7 @@ function cmdAttach(opts) {
         });
         return;
     }
-    const status = task.status || 'unknown';
-    const runningLike = new Set(['running', 'pending']);
-    if (!runningLike.has(status)) {
-        printJson({
-            ok: true,
-            id: opts.id,
-            sent: false,
-            requires_confirmation: true,
-            reason: `task_not_running:${status}`,
-            actions: [
-                { action: 'spawn_followup_new_worktree', recommended: true },
-                { action: 'spawn_followup_reuse_worktree', recommended: false },
-            ],
-        });
-        return;
-    }
     const session = task.tmux_session || '';
-    if (!tmuxAlive(session)) {
-        printJson({
-            ok: true,
-            id: opts.id,
-            sent: false,
-            requires_confirmation: true,
-            reason: 'session_not_alive',
-            actions: [
-                { action: 'spawn_followup_new_worktree', recommended: true },
-                { action: 'spawn_followup_reuse_worktree', recommended: false },
-            ],
-        });
-        return;
-    }
     try {
         tmuxSendText(session, msg);
     }
@@ -1167,13 +1159,69 @@ function cmdCancel(opts) {
         cancel: task.cancel,
     });
 }
+function cmdOnExit(opts) {
+    if (!opts.id)
+        fail('on-exit requires --id');
+    const id = String(opts.id);
+    let task = loadTaskById(id);
+    if (!task) {
+        // Spawn can save task metadata slightly after tmux starts; allow short retry window.
+        for (let i = 0; i < 30 && !task; i += 1) {
+            sleepMs(100);
+            task = loadTaskById(id);
+        }
+    }
+    if (!task)
+        fail(`task not found: ${opts.id}`);
+    const mode = normalizeMode(task.mode);
+    const old = String(task.status || 'running');
+    if (isTerminalStatus(old)) {
+        printJson({ ok: true, id: task.id, already_terminal: true, status: old });
+        return;
+    }
+    const ecNum = Number.parseInt(String(opts.exitCode ?? ''), 10);
+    const exitCode = Number.isNaN(ecNum) ? 1 : ecNum;
+    const next = mode === MODE_BATCH
+        ? (exitCode === 0 ? 'success' : 'failed')
+        : 'failed';
+    const now = nowIso();
+    task.mode = mode;
+    task.exit_code = exitCode;
+    task.status = next;
+    task.updated_at = now;
+    task.last_activity_at = now;
+    task.converged_at = now;
+    task.converged_reason = mode === MODE_BATCH
+        ? `exit_file_code:${exitCode}`
+        : `interactive_exit_code:${exitCode}`;
+    applyDodOnStatusTransition(task, old, next, mode);
+    saveTask(task);
+    const session = String(task.tmux_session || '');
+    if (session)
+        tmuxCloseSession(session);
+    const exitFile = String(task.exit_file || '');
+    if (exitFile) {
+        try {
+            fs.rmSync(exitFile, { force: true });
+        }
+        catch {
+            // Ignore cleanup failure; status already persisted.
+        }
+    }
+    printJson({ ok: true, id: task.id, status: task.status, exit_code: task.exit_code, converged_reason: task.converged_reason });
+}
 function cmdCheck(opts) {
     const loaded = loadTasks();
     const now = new Date();
     const refreshFlags = loaded.map((t) => {
         const mode = normalizeMode(t.mode);
-        if (mode === MODE_INTERACTIVE)
+        if (mode === MODE_INTERACTIVE) {
+            if (isTerminalStatus(String(t.status || '')))
+                return false;
+            if (!tmuxAlive(String(t.tmux_session || '')))
+                return true;
             return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
+        }
         return true;
     });
     const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
@@ -1530,6 +1578,7 @@ function showHelp() {
         '  publish',
         '  create-pr',
         '  list',
+        '  on-exit (internal)',
         '',
     ].join('\n'));
 }
@@ -1542,6 +1591,7 @@ function showCommandHelp(cmd) {
         check: ['usage: swarm.ts check [--changes-only]'],
         status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
         'update-dod': ['usage: swarm.ts update-dod --id <id> --status pass|fail [--result <json>]'],
+        'on-exit': ['usage: swarm.ts on-exit --id <id> --exit-code <int>'],
         publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
         'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
         list: ['usage: swarm.ts list'],
@@ -1615,6 +1665,13 @@ function main() {
                 status: optsRaw.status,
                 result: optsRaw.result,
                 resultFile: optsRaw.resultFile,
+            });
+            return;
+        }
+        if (cmd === 'on-exit') {
+            cmdOnExit({
+                id: optsRaw.id,
+                exitCode: optsRaw.exitCode,
             });
             return;
         }
