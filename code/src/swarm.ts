@@ -1069,7 +1069,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const tools = detectTools();
   if (!tools.tmux) fail('tmux is not installed');
   if (!tools.git) fail('git is not installed');
-  const worktreeMode = String(opts.worktreeMode || '').toLowerCase();
+  const sessionMode = String(opts.sessionMode || '').toLowerCase();
   const tasks = loadTasks();
   const parent = tasks.find((t) => t.id === opts.from);
   if (!parent) fail(`task not found: ${opts.from}`);
@@ -1080,7 +1080,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   if (!parentAgent) fail(`parent task agent missing: ${opts.from}`);
   const requestedAgent = String(opts.agent || '').trim();
   let agent = '';
-  if (worktreeMode === 'reuse') {
+  if (sessionMode === 'reuse') {
     if (requestedAgent && requestedAgent !== parentAgent) {
       fail(`reuse mode requires same agent as parent: parent=${parentAgent} requested=${requestedAgent}`);
     }
@@ -1109,9 +1109,9 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const [ok, reason, wtMeta] = prepareReusedWorktree(parent);
   if (!ok) fail(reason);
   const parentId = parent.id || '';
-  const continueSession = worktreeMode === 'reuse';
+  const continueSession = sessionMode === 'reuse';
   const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests, continueSession);
-  task.worktree_mode = opts.worktreeMode;
+  task.session_mode = sessionMode;
   task.dod = {};
   saveTask(task);
   printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
@@ -1651,7 +1651,7 @@ function showHelp(): void {
 function showCommandHelp(cmd: string): void {
   const lines: Record<string, string[]> = {
     spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
-    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
+    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --session-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
     attach: ['usage: swarm.ts attach --id <id> --message <text>'],
     cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
     check: ['usage: swarm.ts check [--changes-only]'],
@@ -1691,12 +1691,15 @@ function main(): void {
       return;
     }
     if (cmd === 'spawn-followup') {
-      if (!optsRaw.from || !optsRaw.task || !optsRaw.worktreeMode) fail('spawn-followup requires --from --task --worktree-mode');
-      if (!['new', 'reuse'].includes(String(optsRaw.worktreeMode))) fail('worktree mode must be new|reuse');
+      const sessionMode = optsRaw.sessionMode;
+      if (!optsRaw.from || !optsRaw.task || !sessionMode) {
+        fail('spawn-followup requires --from --task --session-mode');
+      }
+      if (!['new', 'reuse'].includes(String(sessionMode))) fail('session mode must be new|reuse');
       cmdSpawnFollowup({
         from: String(optsRaw.from),
         task: String(optsRaw.task),
-        worktreeMode: String(optsRaw.worktreeMode),
+        sessionMode: String(sessionMode),
         agent: optsRaw.agent,
         name: optsRaw.name,
         requiredTest: optsRaw.requiredTest,
