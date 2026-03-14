@@ -1044,7 +1044,7 @@ function cmdSpawnFollowup(opts) {
         fail('tmux is not installed');
     if (!tools.git)
         fail('git is not installed');
-    const sessionMode = String(opts.sessionMode || opts.worktreeMode || '').toLowerCase();
+    const sessionMode = String(opts.sessionMode || '').toLowerCase();
     const tasks = loadTasks();
     const parent = tasks.find((t) => t.id === opts.from);
     if (!parent)
@@ -1093,8 +1093,6 @@ function cmdSpawnFollowup(opts) {
     const continueSession = sessionMode === 'reuse';
     const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests, continueSession);
     task.session_mode = sessionMode;
-    // Backward compatibility for existing consumers.
-    task.worktree_mode = sessionMode;
     task.dod = {};
     saveTask(task);
     printJson({ ok: true, task, parent_id: parentId, registry: GLOBAL_TASKS_DIR });
@@ -1661,9 +1659,9 @@ function main() {
             return;
         }
         if (cmd === 'spawn-followup') {
-            const sessionMode = optsRaw.sessionMode ?? optsRaw.worktreeMode;
+            const sessionMode = optsRaw.sessionMode;
             if (!optsRaw.from || !optsRaw.task || !sessionMode) {
-                fail('spawn-followup requires --from --task --session-mode (or legacy --worktree-mode)');
+                fail('spawn-followup requires --from --task --session-mode');
             }
             if (!['new', 'reuse'].includes(String(sessionMode)))
                 fail('session mode must be new|reuse');

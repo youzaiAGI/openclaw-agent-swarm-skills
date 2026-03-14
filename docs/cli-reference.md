@@ -31,7 +31,7 @@ Create a new task based on an existing terminal task.
 ### Options
 - `--from <task_id>`: (Required) The ID of the parent task.
 - `--task "<text>"`: (Required) Description of the follow-up task.
-- `--worktree-mode <new|reuse>`: Whether to create a new worktree or reuse the parent's (`reuse` requires the parent session to be dead).
+- `--session-mode <new|reuse>`: Follow-up session behavior on the reused parent worktree (`reuse` requires the parent session to be dead).
 - `--agent <codex|claude|gemini>`: (Optional) Override the parent agent.
 - `--required-test "<cmd>"`: (Optional, repeatable) New/overridden test commands.
 

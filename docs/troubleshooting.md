@@ -10,7 +10,7 @@ Common issues and solutions for OpenClaw Agent Swarm.
 
 ### "Task status is `stopped` unexpectedly"
 - **Reason**: The Tmux session might have crashed or been killed by a system restart.
-- **Solution**: Re-run the task using `spawn-followup --worktree-mode reuse`.
+- **Solution**: Re-run the task using `spawn-followup --session-mode reuse`.
 
 ## 2. Lock File Issues
 
@@ -28,7 +28,7 @@ Common issues and solutions for OpenClaw Agent Swarm.
 
 ### "Worktree missing"
 - **Reason**: The `~/.agents/agent-swarm/worktree/` directory was manually deleted.
-- **Solution**: Re-run the task with `spawn-followup --worktree-mode new`.
+- **Solution**: Re-run the task with `spawn-followup --session-mode new`.
 
 ## 4. Permission & Environment Issues
 
