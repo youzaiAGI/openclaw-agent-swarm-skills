@@ -211,6 +211,7 @@ function detectTools() {
     return {
         codex: has('codex'),
         claude: has('claude'),
+        gemini: has('gemini'),
         tmux: has('tmux'),
         git: has('git'),
     };
@@ -225,7 +226,9 @@ function pickAgent(requested, tools) {
         return 'codex';
     if (tools.claude)
         return 'claude';
-    fail('neither codex nor claude is installed');
+    if (tools.gemini)
+        return 'gemini';
+    fail('none of codex, claude, gemini is installed');
 }
 function validateAgentCommand(agent) {
     const cp = run([agent, '--version'], undefined, false);
@@ -287,9 +290,6 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:repo_missing_or_not_git', {}];
     if (!isGitRepo(wt))
         return [false, 'reuse_guard_failed:worktree_not_git', {}];
-    const status = run(['git', 'status', '--porcelain'], wt, false);
-    if (status.code !== 0 || status.stdout.trim() !== '')
-        return [false, 'reuse_guard_failed:worktree_not_clean', {}];
     const sess = parent.tmux_session || '';
     if (sess && run(['tmux', 'has-session', '-t', sess], undefined, false).code === 0) {
         return [false, 'reuse_guard_failed:parent_session_running', {}];
@@ -299,7 +299,7 @@ function prepareReusedWorktree(parent) {
         return [false, 'reuse_guard_failed:branch_unresolvable', {}];
     return [true, 'ok', { worktree: wt, branch: head.stdout.trim() || parent.branch || '', base_branch: parent.base_branch || '' }];
 }
-function buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath) {
+function buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath, continueSession = false) {
     const promptQ = shellQuote(promptPath);
     const logQ = shellQuote(logPath);
     const exitQ = shellQuote(exitPath);
@@ -310,12 +310,28 @@ function buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPa
     let interactiveBase = '';
     let batchBase = '';
     if (agent === 'codex') {
-        interactiveBase = 'codex --dangerously-bypass-approvals-and-sandbox';
-        batchBase = 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"';
+        interactiveBase = continueSession
+            ? 'codex resume --last --dangerously-bypass-approvals-and-sandbox'
+            : 'codex --dangerously-bypass-approvals-and-sandbox';
+        batchBase = continueSession
+            ? 'codex exec resume --last "$prompt" --dangerously-bypass-approvals-and-sandbox'
+            : 'codex exec --dangerously-bypass-approvals-and-sandbox "$prompt"';
     }
     else if (agent === 'claude') {
-        interactiveBase = 'claude --dangerously-skip-permissions';
-        batchBase = 'claude --dangerously-skip-permissions -p "$prompt"';
+        interactiveBase = continueSession
+            ? 'claude --continue --dangerously-skip-permissions'
+            : 'claude --dangerously-skip-permissions';
+        batchBase = continueSession
+            ? 'claude --dangerously-skip-permissions --continue -p "$prompt"'
+            : 'claude --dangerously-skip-permissions -p "$prompt"';
+    }
+    else if (agent === 'gemini') {
+        interactiveBase = continueSession
+            ? 'gemini --resume latest --yolo'
+            : 'gemini --yolo';
+        batchBase = continueSession
+            ? 'gemini --resume latest --prompt "$prompt" --yolo'
+            : 'gemini --prompt "$prompt" --yolo';
     }
     else {
         fail(`unsupported agent: ${agent}`);
@@ -506,7 +522,7 @@ function buildPrompt(taskId, _repo, worktree, userTask, parentTaskId = '') {
         '',
     ].join('\n');
 }
-function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId = '', requiredTests = []) {
+function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId = '', requiredTests = [], continueSession = false) {
     ensureGlobalStateDir();
     const logsDir = path.join(GLOBAL_STATE_DIR, 'logs');
     const promptsDir = path.join(GLOBAL_STATE_DIR, 'prompts');
@@ -523,7 +539,7 @@ function spawnInTmux(taskId, repo, wtMeta, agent, mode, userTask, parentTaskId =
         fs.writeFileSync(exitPath, '', 'utf-8');
         fs.rmSync(exitPath, { force: true });
     }
-    const cmd = buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath);
+    const cmd = buildAgentStartCommand(agent, mode, taskId, promptPath, logPath, exitPath, continueSession);
     tmuxNewSessionWithEnv(session, wtMeta.worktree, cmd);
     if (mode === MODE_INTERACTIVE) {
         run(['tmux', 'pipe-pane', '-o', '-t', session, `cat >> ${shellQuote(logPath)}`], undefined, false);
@@ -878,6 +894,8 @@ function updateStatus(task, opts) {
             task.exit_code = Number.isNaN(code) ? 1 : code;
             next = 'failed';
             convergedReason = `interactive_exit_code:${task.exit_code}`;
+            if (alive)
+                tmuxCloseSession(session);
         }
         else {
             next = hasRunningHint ? 'running' : 'pending';
@@ -1021,8 +1039,7 @@ function cmdSpawnFollowup(opts) {
         fail('tmux is not installed');
     if (!tools.git)
         fail('git is not installed');
-    const agent = pickAgent(opts.agent, tools);
-    validateAgentCommand(agent);
+    const worktreeMode = String(opts.worktreeMode || '').toLowerCase();
     const tasks = loadTasks();
     const parent = tasks.find((t) => t.id === opts.from);
     if (!parent)
@@ -1030,10 +1047,28 @@ function cmdSpawnFollowup(opts) {
     if (!isTerminalStatus(String(parent.status || ''))) {
         fail(`follow-up only allowed for terminal parent task, got: ${parent.status || 'unknown'}`);
     }
+    const parentAgent = String(parent.agent || '').trim();
+    if (!parentAgent)
+        fail(`parent task agent missing: ${opts.from}`);
+    const requestedAgent = String(opts.agent || '').trim();
+    let agent = '';
+    if (worktreeMode === 'reuse') {
+        if (requestedAgent && requestedAgent !== parentAgent) {
+            fail(`reuse mode requires same agent as parent: parent=${parentAgent} requested=${requestedAgent}`);
+        }
+        agent = parentAgent;
+    }
+    else {
+        agent = requestedAgent || parentAgent;
+    }
+    if (!agent || !tools[agent]) {
+        fail(`follow-up agent '${agent || 'unknown'}' is not installed`);
+    }
+    validateAgentCommand(agent);
     const repo = path.resolve(parent.repo || '');
     if (!isGitRepo(repo))
         fail(`parent repo is invalid or not git: ${repo}`);
-    const mode = normalizeMode(opts.mode || parent.mode || MODE_BATCH);
+    const mode = normalizeMode(parent.mode || MODE_BATCH);
     const requiredTests = normalizeRequiredTests(opts.requiredTest !== undefined ? opts.requiredTest : parent.required_tests);
     const existing = new Set(tasks.map((t) => String(t.id || '')));
     let taskId = String(opts.name || '').trim();
@@ -1046,17 +1081,12 @@ function cmdSpawnFollowup(opts) {
             taskId = nowId();
         while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
     }
-    let wtMeta;
-    if (opts.worktreeMode === 'new')
-        wtMeta = createWorktree(repo, taskId);
-    else {
-        const [ok, reason, meta] = prepareReusedWorktree(parent);
-        if (!ok)
-            fail(reason);
-        wtMeta = meta;
-    }
+    const [ok, reason, wtMeta] = prepareReusedWorktree(parent);
+    if (!ok)
+        fail(reason);
     const parentId = parent.id || '';
-    const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests);
+    const continueSession = worktreeMode === 'reuse';
+    const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests, continueSession);
     task.worktree_mode = opts.worktreeMode;
     task.dod = {};
     saveTask(task);
@@ -1584,8 +1614,8 @@ function showHelp() {
 }
 function showCommandHelp(cmd) {
     const lines = {
-        spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
-        'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--mode interactive|batch] [--agent codex|claude] [--name <name>] [--required-test <cmd> ...]'],
+        spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
+        'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --worktree-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
         attach: ['usage: swarm.ts attach --id <id> --message <text>'],
         cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
         check: ['usage: swarm.ts check [--changes-only]'],

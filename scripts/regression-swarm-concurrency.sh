@@ -14,6 +14,7 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1;
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
+command -v gemini >/dev/null 2>&1 || { echo "ERROR: gemini is required" >&2; exit 1; }
 
 # policy knobs (script-side external timeout control)
 BATCH_RUNNING_KILL_SEC=180
@@ -33,7 +34,7 @@ trap cleanup EXIT
 
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
-echo "[INFO] workload: 8 tasks (codex/claude x batch/interactive x read/write)"
+echo "[INFO] workload: 12 tasks (codex/claude/gemini x batch/interactive x read/write)"
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require stopped"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
@@ -48,7 +49,7 @@ git -C "$TMP_REPO" add README.md
 git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
-for agent in codex claude; do
+for agent in codex claude gemini; do
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "ro" "-" "-" \
     "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
@@ -56,9 +57,12 @@ for agent in codex claude; do
   if [[ "$agent" == "codex" ]]; then
     batch_file="REG_BATCH_CDX.md"
     batch_commit="test: codex batch write"
-  else
+  elif [[ "$agent" == "claude" ]]; then
     batch_file="REG_BATCH_CLD.md"
     batch_commit="test: claude batch write"
+  else
+    batch_file="REG_BATCH_GMN.md"
+    batch_commit="test: gemini batch write"
   fi
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
