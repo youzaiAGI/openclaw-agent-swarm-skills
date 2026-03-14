@@ -25,14 +25,6 @@ The swarm ensures safe and controllable execution through multiple layers of iso
 
 ![Architecture](docs/arch.svg)
 
-```mermaid
-flowchart LR
-    Coordinator[Coordinator Agent] --> Swarm[Swarm Skill]
-    Swarm --> TaskA[Task A: Tmux + Worktree]
-    Swarm --> TaskB[Task B: Tmux + Worktree]
-    TaskA --> Agent[Claude/Codex/Gemini]
-```
-
 ---
 
 ## 🛠️ Quick Setup

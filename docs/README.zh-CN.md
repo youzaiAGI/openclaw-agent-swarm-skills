@@ -25,14 +25,6 @@ Swarm 通过多层隔离机制确保 Agent 执行过程的安全与可控：
 
 ![架构图](arch.svg)
 
-```mermaid
-flowchart LR
-    Coordinator[协调器 Agent] --> Swarm[Swarm Skill]
-    Swarm --> TaskA[任务 A: Tmux + Worktree]
-    Swarm --> TaskB[任务 B: Tmux + Worktree]
-    TaskA --> Agent[Claude/Codex/Gemini]
-```
-
 ---
 
 ## 🛠️ 快速上手
