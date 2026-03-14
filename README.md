@@ -86,5 +86,4 @@ A task isn't finished until the DoD is satisfied.
 *   [✅ Definition of Done Guide](docs/dod-workflow.md) - Deep dive into built-in vs semantic checks.
 *   [🤖 Agent Integration](docs/agent-integration.md) - How we handle different AI CLI tools.
 *   [🛠️ Troubleshooting](docs/troubleshooting.md) - Solving common issues (locks, sessions, etc.).
-*   [📝 Technical Blog Post](docs/blog-openclaw-agent-swarm.md) - A deep dive into the swarm's capabilities.
 *   [⚙️ State & JSON Format](skills/openclaw-agent-swarm/references/state-format.md) - Technical spec for developers.

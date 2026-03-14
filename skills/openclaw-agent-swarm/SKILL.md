@@ -228,3 +228,5 @@ If your runtime uses a `HEARTBEAT.md`, ensure it includes:
 ```bash
 bash "$SKILL_ROOT/scripts/check-agents.sh"
 ```
+
+**Note**: `$SKILL_ROOT` refers to the directory where this `SKILL.md` file is located (i.e., the skill payload root).
