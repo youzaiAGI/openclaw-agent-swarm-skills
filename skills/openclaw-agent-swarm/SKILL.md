@@ -34,7 +34,7 @@ Operational rules (must follow):
 - `update-dod` only updates `task.dod`; it does not update `task.status`.
 - `publish` requires `task.dod.status=pass` and mode-allowed status (`batch=success`, `interactive=stopped`).
 - `spawn-followup new|reuse` both reuse parent worktree.
-- use `--session-mode new|reuse` for follow-up behavior; legacy `--worktree-mode` is accepted for compatibility.
+- use `--session-mode new|reuse` for follow-up behavior.
 - `spawn-followup`: mode always follows parent task mode; do not rely on `--mode`.
 - `spawn-followup` agent rules: `new` can specify agent (default parent agent), `reuse` must match parent agent.
 - `attach` is only for non-terminal interactive tasks; successful attach writes `task.status=running`.
