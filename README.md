@@ -70,8 +70,11 @@ A task isn't finished until the DoD is satisfied.
 
 ## 📂 Documentation Reference
 
-*   [CLI Full Manual](docs/cli-reference.md) - For advanced users and manual Shell execution.
-*   [Definition of Done Guide](docs/dod-workflow.md) - Deep dive into built-in vs semantic checks.
-*   [Agent Integration](docs/agent-integration.md) - How we handle different AI CLI tools.
-*   [Troubleshooting](docs/troubleshooting.md) - Solving common issues (locks, sessions, etc.).
-*   [State & JSON Format](skills/openclaw-agent-swarm/references/state-format.md) - Technical spec for developers.
+*   [🚀 Getting Started Guide](docs/getting-started.md) - Step-by-step setup and first task.
+*   [🏛️ Architecture Deep Dive](docs/architecture.md) - Detailed design of the isolation and execution model.
+*   [📜 CLI Full Manual](docs/cli-reference.md) - For advanced users and manual Shell execution.
+*   [✅ Definition of Done Guide](docs/dod-workflow.md) - Deep dive into built-in vs semantic checks.
+*   [🤖 Agent Integration](docs/agent-integration.md) - How we handle different AI CLI tools.
+*   [🛠️ Troubleshooting](docs/troubleshooting.md) - Solving common issues (locks, sessions, etc.).
+*   [📝 Technical Blog Post](docs/blog-openclaw-agent-swarm.md) - A deep dive into the swarm's capabilities (Great for sharing!).
+*   [⚙️ State & JSON Format](skills/openclaw-agent-swarm/references/state-format.md) - Technical spec for developers.
