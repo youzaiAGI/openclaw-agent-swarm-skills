@@ -26,7 +26,6 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 |--------|---------|
 | `$SKILL_DIR/scripts/swarm.js` | Main entry point |
 | `$SKILL_DIR/scripts/check-agents.sh` | check script |
-| `$SKILL_DIR/scripts/check-agents.sh` | check script |
 
 ## DoD Workflow
 
