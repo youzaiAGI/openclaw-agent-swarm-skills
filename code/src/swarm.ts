@@ -1136,9 +1136,10 @@ function cmdAttach(opts: AnyObj): void {
   const mode = normalizeMode(task.mode);
   if (!modeSupportsAttach(mode)) {
     printJson({
-      ok: true,
+      ok: false,
       id: opts.id,
       sent: false,
+      error: 'attach_not_supported_in_batch_mode',
       requires_confirmation: true,
       reason: 'attach_not_supported_in_batch_mode',
       actions: [
@@ -1152,7 +1153,17 @@ function cmdAttach(opts: AnyObj): void {
   try {
     tmuxSendText(session, msg);
   } catch (e) {
-    fail(`failed to send message to tmux session ${session}: ${String(e)}`);
+    printJson({
+      ok: false,
+      id: opts.id,
+      sent: false,
+      error: 'attach_failed_tmux_send',
+      detail: String(e),
+      session,
+      requires_confirmation: true,
+      actions: [{ action: 'manual_attach_tmux_session', recommended: true }],
+    });
+    return;
   }
   task.status = 'running';
   task.updated_at = nowIso();
@@ -1173,7 +1184,15 @@ function cmdCancel(opts: AnyObj): void {
   const now = nowIso();
 
   if (isTerminalStatus(status)) {
-    printJson({ ok: true, id: opts.id, cancelled: false, already_terminal: true, status });
+    printJson({
+      ok: false,
+      id: opts.id,
+      cancelled: false,
+      already_terminal: true,
+      status,
+      error: `task_already_terminal:${status}`,
+      requires_confirmation: false,
+    });
     return;
   }
 
@@ -1432,7 +1451,14 @@ function cmdStatus(opts: AnyObj): void {
   }
   if (opts.query) {
     const candidates = findTaskCandidates(tasks, opts.query);
-    if (!candidates.length) fail(`no tasks matched query: ${opts.query}`);
+    if (!candidates.length) {
+      printJson({
+        ok: false,
+        requires_confirmation: false,
+        error: `query_no_match:${opts.query}`,
+      });
+      return;
+    }
     if (candidates.length > 1 && candidates[0]._score === candidates[1]._score) {
       printJson({
         ok: false,
