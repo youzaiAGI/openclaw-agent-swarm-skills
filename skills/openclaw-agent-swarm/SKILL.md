@@ -18,10 +18,20 @@ Use this skill to run coding tasks asynchronously in isolated worktrees.
 7. `check/status` must include fallback: if task is non-terminal but tmux session is gone, converge task to `stopped`.
 8. DoD is checked after task reaches terminal status and can be updated by the caller agent/runtime.
 
+## Script Directory
+
+**Agent Execution**: Determine this SKILL.md directory as `SKILL_DIR`
+
+| Script | Purpose |
+|--------|---------|
+| `$SKILL_DIR/scripts/swarm.js` | Main entry point |
+| `$SKILL_DIR/scripts/check-agents.sh` | check script |
+| `$SKILL_DIR/scripts/check-agents.sh` | check script |
+
 ## DoD Workflow
 
 References:
-- `references/dod.md`
+- `$SKILL_DIR/references/dod.md`
 
 Status model (must treat as two independent axes):
 - `task.status` is execution lifecycle state: `running | pending | success | failed | stopped`.
@@ -70,7 +80,7 @@ How to update `task.json` DoD:
 ## Commands
 
 ```bash
-node "scripts/swarm.js" <subcommand> ...
+node "$SKILL_DIR/scripts/swarm.js" <subcommand> ...
 ```
 
 ## Quick Examples
@@ -78,7 +88,7 @@ node "scripts/swarm.js" <subcommand> ...
 Spawn a new batch task:
 
 ```bash
-node "scripts/swarm.js" spawn \
+node "$SKILL_DIR/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --mode batch \
   --agent codex \
@@ -89,7 +99,7 @@ node "scripts/swarm.js" spawn \
 Spawn a new interactive task:
 
 ```bash
-node "scripts/swarm.js" spawn \
+node "$SKILL_DIR/scripts/swarm.js" spawn \
   --repo /path/to/repo \
   --mode interactive \
   --agent claude \
@@ -99,13 +109,13 @@ node "scripts/swarm.js" spawn \
 Prefer single-task status refresh:
 
 ```bash
-node "scripts/swarm.js" status --id <task_id>
+node "$SKILL_DIR/scripts/swarm.js" status --id <task_id>
 ```
 
 Attach instructions to a running interactive task:
 
 ```bash
-node "scripts/swarm.js" attach \
+node "$SKILL_DIR/scripts/swarm.js" attach \
   --id <task_id> \
   --message "Prioritize API layer first, then update tests"
 ```
@@ -113,7 +123,7 @@ node "scripts/swarm.js" attach \
 Cancel a running task:
 
 ```bash
-node "scripts/swarm.js" cancel \
+node "$SKILL_DIR/scripts/swarm.js" cancel \
   --id <task_id> \
   --reason "manual stop"
 ```
@@ -121,14 +131,14 @@ node "scripts/swarm.js" cancel \
 Follow-up from a terminal task (both modes reuse parent worktree):
 
 ```bash
-node "scripts/swarm.js" spawn-followup \
+node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --session-mode new \
   --task "Address review comments"
 ```
 
 ```bash
-node "scripts/swarm.js" spawn-followup \
+node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --session-mode reuse \
   --task "Continue with previous conversation context"
@@ -137,7 +147,7 @@ node "scripts/swarm.js" spawn-followup \
 Write back DoD from external `dod.md` validation:
 
 ```bash
-node "scripts/swarm.js" update-dod \
+node "$SKILL_DIR/scripts/swarm.js" update-dod \
   --id <task_id> \
   --status pass \
   --result '{"summary":"dod.md checks passed","error":""}'
@@ -146,13 +156,13 @@ node "scripts/swarm.js" update-dod \
 Publish only when mode/status is allowed and DoD is pass:
 
 ```bash
-node "scripts/swarm.js" publish --id <task_id> --auto-pr
+node "$SKILL_DIR/scripts/swarm.js" publish --id <task_id> --auto-pr
 ```
 
 Spawn:
 
 ```bash
-node "scripts/swarm.js" spawn \
+node "$SKILL_DIR/scripts/swarm.js" spawn \
   --repo <git_repo_path> \
   --task "<task>" \
   [--mode interactive|batch] \
@@ -163,7 +173,7 @@ node "scripts/swarm.js" spawn \
 Spawn follow-up:
 
 ```bash
-node "scripts/swarm.js" spawn-followup \
+node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
   --from <task_id> \
   --task "<task>" \
   --session-mode new|reuse \
@@ -180,7 +190,7 @@ Follow-up behavior:
 Attach:
 
 ```bash
-node "scripts/swarm.js" attach --id <task_id> --message "<message>"
+node "$SKILL_DIR/scripts/swarm.js" attach --id <task_id> --message "<message>"
 ```
 
 Behavior:
@@ -190,21 +200,21 @@ Behavior:
 Cancel:
 
 ```bash
-node "scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
+node "$SKILL_DIR/scripts/swarm.js" cancel --id <task_id> [--reason "<reason>"]
 ```
 
 Check, status, and list:
 
 ```bash
-node "scripts/swarm.js" check --changes-only
-node "scripts/swarm.js" status --id <task_id>
-node "scripts/swarm.js" list
+node "$SKILL_DIR/scripts/swarm.js" check --changes-only
+node "$SKILL_DIR/scripts/swarm.js" status --id <task_id>
+node "$SKILL_DIR/scripts/swarm.js" list
 ```
 
 Update DoD:
 
 ```bash
-node "scripts/swarm.js" update-dod \
+node "$SKILL_DIR/scripts/swarm.js" update-dod \
   --id <task_id> \
   --status pass \
   --result '{"summary":"dod.md checks passed","error":""}'
@@ -213,20 +223,18 @@ node "scripts/swarm.js" update-dod \
 Publish and PR:
 
 ```bash
-node "scripts/swarm.js" publish --id <task_id> [--auto-pr]
-node "scripts/swarm.js" create-pr --id <task_id>
+node "$SKILL_DIR/scripts/swarm.js" publish --id <task_id> [--auto-pr]
+node "$SKILL_DIR/scripts/swarm.js" create-pr --id <task_id>
 ```
 
 Heartbeat wrapper:
 
 ```bash
-bash "scripts/check-agents.sh"
+bash "$SKILL_DIR/scripts/check-agents.sh"
 ```
 
 If your runtime uses a `HEARTBEAT.md`, ensure it includes:
 
 ```bash
-bash "$SKILL_ROOT/scripts/check-agents.sh"
+bash "$SKILL_DIR/scripts/check-agents.sh"
 ```
-
-**Note**: `$SKILL_ROOT` refers to the directory where this `SKILL.md` file is located (i.e., the skill payload root).
