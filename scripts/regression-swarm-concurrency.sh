@@ -111,7 +111,7 @@ trap cleanup EXIT
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
 echo "[INFO] agents: ${AGENTS_LIST[*]}"
-echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 6)) tasks (${AGENTS_LIST[*]} x 4 base cases + 2 follow-up context cases)"
+echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 8)) tasks (${AGENTS_LIST[*]} x 4 base cases + 4 follow-up context cases)"
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require success"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
@@ -129,7 +129,7 @@ git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
 for agent in "${AGENTS_LIST[@]}"; do
-  context_marker="CTX_${PREFIX}_${agent}_MEM"
+  batch_context_marker="CTX_${PREFIX}_${agent}_BATCH_MEM"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "ro" "-" "-" \
     "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
@@ -147,7 +147,7 @@ for agent in "${AGENTS_LIST[@]}"; do
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "write" "$batch_file" "$batch_commit" \
-    "批处理写任务：在仓库根目录创建 ${batch_file}，写两行文本并提交 commit，提交信息为 \"${batch_commit}\"，并记住本次会话 token=${context_marker}；完成后退出。" >> "$TASKS_FILE"
+    "批处理写任务：在仓库根目录创建 ${batch_file}，写两行文本并提交 commit，提交信息为 \"${batch_commit}\"，并记住本次会话 token=${batch_context_marker}；完成后退出。" >> "$TASKS_FILE"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "interactive" "ro" "-" "-" \
@@ -216,16 +216,18 @@ if [[ "$spawn_fail" -ne 0 ]]; then
 fi
 
 echo "[INFO] spawn phase ok (${#TASK_IDS[@]} tasks)"
-for id in "${TASK_IDS[@]}"; do
-  if [[ -f /tmp/"${id}".spawn.out ]]; then
-    out="$(cat /tmp/"${id}".spawn.out || true)"
-    [[ -n "$out" ]] && echo "[SWARM][RET][spawn:$id] $out"
-  fi
-  if [[ -f /tmp/"${id}".spawn.err ]]; then
-    err="$(cat /tmp/"${id}".spawn.err || true)"
-    [[ -n "$err" ]] && echo "[SWARM][RET][spawn:$id:stderr] $err"
-  fi
-done
+if [[ "${REGRESSION_VERBOSE:-0}" == "1" ]]; then
+  for id in "${TASK_IDS[@]}"; do
+    if [[ -f /tmp/"${id}".spawn.out ]]; then
+      out="$(cat /tmp/"${id}".spawn.out || true)"
+      [[ -n "$out" ]] && echo "[SWARM][RET][spawn:$id] $out"
+    fi
+    if [[ -f /tmp/"${id}".spawn.err ]]; then
+      err="$(cat /tmp/"${id}".spawn.err || true)"
+      [[ -n "$err" ]] && echo "[SWARM][RET][spawn:$id:stderr] $err"
+    fi
+  done
+fi
 echo "[PROGRESS] phase=spawn"
 for id in "${TASK_IDS[@]}"; do
   echo "[PROGRESS][spawn] task=$id status=spawned"
@@ -507,6 +509,24 @@ for id in "${INTERACTIVE_IDS[@]}"; do
     continue
   fi
   echo "[OK] attach verified: $id"
+  for agent in "${AGENTS_LIST[@]}"; do
+    if [[ "$id" == "${PREFIX}-${agent}-interactive-write" ]]; then
+      marker="CTX_${PREFIX}_${agent}_INTERACTIVE_MEM"
+      marker_msg="回归上下文标记：请记住 token=${marker}。只回复“已记录，继续等待”。"
+      marker_attach_json="$(swarm_json "attach-marker:$id" attach --id "$id" --message "$marker_msg")"
+      marker_attach_sent="$(ATTACH_JSON="$marker_attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
+      if [[ "$marker_attach_sent" != "true" ]]; then
+        echo "[ERROR] attach marker failed for interactive-write parent: $id"
+        cancel_task "$id" "attach_marker_failed_cleanup" || true
+        interactive_fail=1
+        interactive_fail_count=$((interactive_fail_count + 1))
+        print_task_result "$id" "false" "interactive_attach_marker_failed"
+        continue 2
+      fi
+      echo "[OK] interactive parent marker attached: $id marker=$marker"
+      break
+    fi
+  done
   INTERACTIVE_READY_IDS+=("$id")
 done
 
@@ -583,6 +603,18 @@ wait_task_status() {
   done
 }
 
+select_alternate_agent() {
+  local parent_agent="$1"
+  local cand
+  for cand in codex claude gemini; do
+    if [[ "$cand" != "$parent_agent" ]] && command -v "$cand" >/dev/null 2>&1; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
 for id in "${INTERACTIVE_READY_IDS[@]}"; do
   logp="$(get_task_log "$id" || true)"
   if ! wait_interactive_quiet_then_pending "$id" "$logp"; then
@@ -641,71 +673,172 @@ for id in "${WRITE_IDS[@]}"; do
   fi
 done
 
-# 6) follow-up context check on batch-write parents:
-#    same parent task:
-#    - reuse mode should recall prior context token
-#    - new mode should not have that context (expect NONE)
+# 6) follow-up context checks on both parent types:
+#    - parent batch-write: reuse recalls marker, new returns NONE
+#    - parent interactive-write: reuse recalls marker, new returns NONE
+#    and reuse cross-agent must be rejected.
 followup_fail=0
 followup_pass_count=0
 followup_fail_count=0
+cross_agent_fail=0
+cross_agent_pass_count=0
+cross_agent_fail_count=0
 for agent in "${AGENTS_LIST[@]}"; do
-  parent_id="${PREFIX}-${agent}-batch-write"
-  marker="CTX_${PREFIX}_${agent}_MEM"
-  reuse_id="${parent_id}-followup-reuse"
-  new_id="${parent_id}-followup-new"
+  batch_parent_id="${PREFIX}-${agent}-batch-write"
+  interactive_parent_id="${PREFIX}-${agent}-interactive-write"
+  batch_marker="CTX_${PREFIX}_${agent}_BATCH_MEM"
+  interactive_marker="CTX_${PREFIX}_${agent}_INTERACTIVE_MEM"
 
-  reuse_task='followup context(reuse): 只输出一行 FOLLOWUP_CONTEXT=<value>。如果能回忆上一个任务中的会话 token 就输出该 token，否则输出 NONE；不要读取任何文件，然后退出。'
-  new_task='followup context(new): 只输出一行 FOLLOWUP_CONTEXT=<value>。如果能回忆上一个任务中的会话 token 就输出该 token，否则输出 NONE；不要读取任何文件，然后退出。'
+  batch_reuse_id="${batch_parent_id}-followup-batch-reuse"
+  batch_new_id="${batch_parent_id}-followup-batch-new"
+  interactive_reuse_id="${interactive_parent_id}-followup-interactive-reuse"
+  interactive_new_id="${interactive_parent_id}-followup-interactive-new"
 
-  if ! swarm_json "followup:$reuse_id" spawn-followup --from "$parent_id" --session-mode reuse --name "$reuse_id" --task "$reuse_task" >/dev/null; then
+  followup_task='只读任务：只输出一行 FOLLOWUP_CONTEXT=<value>。如果你记得父任务 token 就输出 token，否则输出 NONE。不要读取文件，不要修改仓库。'
+
+  if ! swarm_json "followup:$batch_reuse_id" spawn-followup --from "$batch_parent_id" --session-mode reuse --name "$batch_reuse_id" --task "$followup_task" >/dev/null; then
     followup_fail=1
     followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$reuse_id" "false" "followup_reuse_spawn_failed"
-    continue
-  fi
-  FOLLOWUP_TASK_IDS+=("$reuse_id")
-  if ! wait_task_status "$reuse_id" "success" 180; then
-    followup_fail=1
-    followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$reuse_id" "false" "followup_reuse_not_success"
-    continue
-  fi
-  reuse_excerpt="$(get_task_result_excerpt "$reuse_id" || true)"
-  if [[ "$reuse_excerpt" == *"FOLLOWUP_CONTEXT=${marker}"* ]]; then
-    followup_pass_count=$((followup_pass_count + 1))
-    print_task_result "$reuse_id" "true" "followup_reuse_context_recalled"
+    print_task_result "$batch_reuse_id" "false" "followup_batch_reuse_spawn_failed"
   else
-    followup_fail=1
-    followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$reuse_id" "false" "followup_reuse_context_missing"
+    FOLLOWUP_TASK_IDS+=("$batch_reuse_id")
+    if ! wait_task_status "$batch_reuse_id" "success" 180; then
+      followup_fail=1
+      followup_fail_count=$((followup_fail_count + 1))
+      print_task_result "$batch_reuse_id" "false" "followup_batch_reuse_not_success"
+    else
+      reuse_excerpt="$(get_task_result_excerpt "$batch_reuse_id" || true)"
+      if [[ "$reuse_excerpt" == *"FOLLOWUP_CONTEXT=${batch_marker}"* ]]; then
+        followup_pass_count=$((followup_pass_count + 1))
+        print_task_result "$batch_reuse_id" "true" "followup_batch_reuse_context_recalled"
+      else
+        followup_fail=1
+        followup_fail_count=$((followup_fail_count + 1))
+        print_task_result "$batch_reuse_id" "false" "followup_batch_reuse_context_missing"
+      fi
+    fi
   fi
 
-  if ! swarm_json "followup:$new_id" spawn-followup --from "$parent_id" --session-mode new --name "$new_id" --task "$new_task" >/dev/null; then
+  if ! swarm_json "followup:$batch_new_id" spawn-followup --from "$batch_parent_id" --session-mode new --name "$batch_new_id" --task "$followup_task" >/dev/null; then
     followup_fail=1
     followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$new_id" "false" "followup_new_spawn_failed"
-    continue
-  fi
-  FOLLOWUP_TASK_IDS+=("$new_id")
-  if ! wait_task_status "$new_id" "success" 180; then
-    followup_fail=1
-    followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$new_id" "false" "followup_new_not_success"
-    continue
-  fi
-  new_excerpt="$(get_task_result_excerpt "$new_id" || true)"
-  if [[ "$new_excerpt" == *"FOLLOWUP_CONTEXT=NONE"* && "$new_excerpt" != *"${marker}"* ]]; then
-    followup_pass_count=$((followup_pass_count + 1))
-    print_task_result "$new_id" "true" "followup_new_no_context_expected"
+    print_task_result "$batch_new_id" "false" "followup_batch_new_spawn_failed"
   else
+    FOLLOWUP_TASK_IDS+=("$batch_new_id")
+    if ! wait_task_status "$batch_new_id" "success" 180; then
+      followup_fail=1
+      followup_fail_count=$((followup_fail_count + 1))
+      print_task_result "$batch_new_id" "false" "followup_batch_new_not_success"
+    else
+      new_excerpt="$(get_task_result_excerpt "$batch_new_id" || true)"
+      if [[ "$new_excerpt" == *"FOLLOWUP_CONTEXT=NONE"* && "$new_excerpt" != *"${batch_marker}"* ]]; then
+        followup_pass_count=$((followup_pass_count + 1))
+        print_task_result "$batch_new_id" "true" "followup_batch_new_no_context_expected"
+      else
+        followup_fail=1
+        followup_fail_count=$((followup_fail_count + 1))
+        print_task_result "$batch_new_id" "false" "followup_batch_new_context_leaked"
+      fi
+    fi
+  fi
+
+  if ! swarm_json "followup:$interactive_reuse_id" spawn-followup --from "$interactive_parent_id" --session-mode reuse --name "$interactive_reuse_id" --task "$followup_task" >/dev/null; then
     followup_fail=1
     followup_fail_count=$((followup_fail_count + 1))
-    print_task_result "$new_id" "false" "followup_new_context_leaked"
+    print_task_result "$interactive_reuse_id" "false" "followup_interactive_reuse_spawn_failed"
+  else
+    FOLLOWUP_TASK_IDS+=("$interactive_reuse_id")
+    logp="$(get_task_log "$interactive_reuse_id" || true)"
+    if ! wait_interactive_quiet_then_pending "$interactive_reuse_id" "$logp"; then
+      followup_fail=1
+      followup_fail_count=$((followup_fail_count + 1))
+      print_task_result "$interactive_reuse_id" "false" "followup_interactive_reuse_pending_failed"
+    else
+      reuse_excerpt="$(get_task_result_excerpt "$interactive_reuse_id" || true)"
+      if [[ "$reuse_excerpt" == *"FOLLOWUP_CONTEXT=${interactive_marker}"* ]]; then
+        followup_pass_count=$((followup_pass_count + 1))
+        print_task_result "$interactive_reuse_id" "true" "followup_interactive_reuse_context_recalled"
+      else
+        followup_fail=1
+        followup_fail_count=$((followup_fail_count + 1))
+        print_task_result "$interactive_reuse_id" "false" "followup_interactive_reuse_context_missing"
+      fi
+      cancel_task "$interactive_reuse_id" "followup_interactive_reuse_done" "success" || true
+      wait_task_status "$interactive_reuse_id" "success" 60 || true
+    fi
+  fi
+
+  if ! swarm_json "followup:$interactive_new_id" spawn-followup --from "$interactive_parent_id" --session-mode new --name "$interactive_new_id" --task "$followup_task" >/dev/null; then
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$interactive_new_id" "false" "followup_interactive_new_spawn_failed"
+  else
+    FOLLOWUP_TASK_IDS+=("$interactive_new_id")
+    logp="$(get_task_log "$interactive_new_id" || true)"
+    if ! wait_interactive_quiet_then_pending "$interactive_new_id" "$logp"; then
+      followup_fail=1
+      followup_fail_count=$((followup_fail_count + 1))
+      print_task_result "$interactive_new_id" "false" "followup_interactive_new_pending_failed"
+    else
+      new_excerpt="$(get_task_result_excerpt "$interactive_new_id" || true)"
+      if [[ "$new_excerpt" == *"FOLLOWUP_CONTEXT=NONE"* && "$new_excerpt" != *"${interactive_marker}"* ]]; then
+        followup_pass_count=$((followup_pass_count + 1))
+        print_task_result "$interactive_new_id" "true" "followup_interactive_new_no_context_expected"
+      else
+        followup_fail=1
+        followup_fail_count=$((followup_fail_count + 1))
+        print_task_result "$interactive_new_id" "false" "followup_interactive_new_context_leaked"
+      fi
+      cancel_task "$interactive_new_id" "followup_interactive_new_done" "success" || true
+      wait_task_status "$interactive_new_id" "success" 60 || true
+    fi
+  fi
+
+  alt_agent="$(select_alternate_agent "$agent" || true)"
+  if [[ -z "$alt_agent" ]]; then
+    cross_agent_fail=1
+    cross_agent_fail_count=$((cross_agent_fail_count + 2))
+    echo "[ERROR] no alternate installed agent for cross-agent reuse check: parent_agent=$agent"
+  else
+    bad_reuse_batch_id="${batch_parent_id}-followup-batch-reuse-cross-agent"
+    if bad_out="$(run_swarm spawn-followup --from "$batch_parent_id" --session-mode reuse --agent "$alt_agent" --name "$bad_reuse_batch_id" --task "$followup_task" 2>&1)"; then
+      cross_agent_fail=1
+      cross_agent_fail_count=$((cross_agent_fail_count + 1))
+      echo "[ERROR] cross-agent reuse unexpectedly succeeded: parent=$batch_parent_id agent=$alt_agent"
+    else
+      if [[ "$bad_out" == *"reuse mode requires same agent as parent"* ]]; then
+        cross_agent_pass_count=$((cross_agent_pass_count + 1))
+        echo "[OK] cross-agent reuse rejected as expected: parent=$batch_parent_id agent=$alt_agent"
+      else
+        cross_agent_fail=1
+        cross_agent_fail_count=$((cross_agent_fail_count + 1))
+        echo "[ERROR] cross-agent reuse error mismatch: parent=$batch_parent_id agent=$alt_agent output=$bad_out"
+      fi
+    fi
+
+    bad_reuse_interactive_id="${interactive_parent_id}-followup-interactive-reuse-cross-agent"
+    if bad_out="$(run_swarm spawn-followup --from "$interactive_parent_id" --session-mode reuse --agent "$alt_agent" --name "$bad_reuse_interactive_id" --task "$followup_task" 2>&1)"; then
+      cross_agent_fail=1
+      cross_agent_fail_count=$((cross_agent_fail_count + 1))
+      echo "[ERROR] cross-agent reuse unexpectedly succeeded: parent=$interactive_parent_id agent=$alt_agent"
+    else
+      if [[ "$bad_out" == *"reuse mode requires same agent as parent"* ]]; then
+        cross_agent_pass_count=$((cross_agent_pass_count + 1))
+        echo "[OK] cross-agent reuse rejected as expected: parent=$interactive_parent_id agent=$alt_agent"
+      else
+        cross_agent_fail=1
+        cross_agent_fail_count=$((cross_agent_fail_count + 1))
+        echo "[ERROR] cross-agent reuse error mismatch: parent=$interactive_parent_id agent=$alt_agent output=$bad_out"
+      fi
+    fi
   fi
 done
 
 if (( followup_fail != 0 )); then
   echo "[ERROR] follow-up context requirement failed"
+fi
+if (( cross_agent_fail != 0 )); then
+  echo "[ERROR] follow-up cross-agent reuse requirement failed"
 fi
 
 for id in "${TASK_IDS[@]}"; do
@@ -718,12 +851,13 @@ for id in "${FOLLOWUP_TASK_IDS[@]}"; do
   echo "[SUMMARY][CASE] task=$id final_status=$st"
 done
 
-if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 || followup_fail != 0 )); then
+if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 || followup_fail != 0 || cross_agent_fail != 0 )); then
   cancel_non_terminal_tasks
   echo "[FAIL] regression failed"
   echo "[SUMMARY][OVERALL] concurrency regression=fail"
   exit 1
 fi
-echo "[SUMMARY] followup_pass=${followup_pass_count}/$((${#AGENTS_LIST[@]} * 2)) followup_fail=${followup_fail_count}/$((${#AGENTS_LIST[@]} * 2))"
+echo "[SUMMARY] followup_pass=${followup_pass_count}/$((${#AGENTS_LIST[@]} * 4)) followup_fail=${followup_fail_count}/$((${#AGENTS_LIST[@]} * 4))"
+echo "[SUMMARY] followup_reuse_cross_agent_pass=${cross_agent_pass_count}/$((${#AGENTS_LIST[@]} * 2)) followup_reuse_cross_agent_fail=${cross_agent_fail_count}/$((${#AGENTS_LIST[@]} * 2))"
 echo "[PASS] regression passed (batch=success, interactive=success, followup_context=pass)"
 echo "[SUMMARY][OVERALL] concurrency regression=pass"
