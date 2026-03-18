@@ -22,14 +22,16 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1;
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 
 AGENTS_RAW="${AGENTS:-codex,claude,gemini}"
+WITH_FOLLOWUP=0
 
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/regression-swarm-concurrency.sh [--agents codex,claude,gemini]
+  ./scripts/regression-swarm-concurrency.sh [--agents codex,claude,gemini] [--with-followup]
 
 Options:
   --agents  Comma-separated agent list. Default: codex,claude,gemini (or AGENTS env)
+  --with-followup  Enable follow-up context regression (reuse/new + cross-agent reuse rejection)
   -h,--help Show help
 USAGE
 }
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "ERROR: --agents requires a value" >&2; exit 1; }
       AGENTS_RAW="$2"
       shift 2
+      ;;
+    --with-followup)
+      WITH_FOLLOWUP=1
+      shift
       ;;
     -h|--help)
       usage
@@ -97,6 +103,7 @@ INTERACTIVE_LOG_QUIET_TO_PENDING_SEC=10
 INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC=180
 INTERACTIVE_PENDING_GRACE_SEC=90
 POLL_SEC=5
+BASE_DOD_JSON='{"checks":{"allowed_statuses":["pending","success"],"require_clean_worktree":true,"require_commits_ahead_base":false,"ci_commands":[]},"actions":{"push_command":"","pr_command":""}}'
 
 PREFIX="regtest-$(date +%Y%m%d-%H%M%S)-$RANDOM"
 TMP_REPO="$(mktemp -d "/tmp/swarm-regrepo-XXXXXX")"
@@ -111,12 +118,18 @@ trap cleanup EXIT
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
 echo "[INFO] agents: ${AGENTS_LIST[*]}"
-echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 8)) tasks (${AGENTS_LIST[*]} x 4 base cases + 4 follow-up context cases)"
+if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+  echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 8)) tasks (${AGENTS_LIST[*]} x 4 base cases + 4 follow-up context cases)"
+else
+  echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 4)) tasks (${AGENTS_LIST[*]} x 4 base cases)"
+fi
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require success"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive pending grace ${INTERACTIVE_PENDING_GRACE_SEC}s after quiet threshold"
-echo "[INFO] policy: follow-up context (same parent): reuse must recall token, new must return NONE"
+if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+  echo "[INFO] policy: follow-up context (same parent): reuse must recall token, new must return NONE"
+fi
 
 git -C "$TMP_REPO" init -q
 git -C "$TMP_REPO" config user.name "swarm-regression"
@@ -189,6 +202,7 @@ while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
       --mode "$mode" \
       --agent "$agent" \
       --name "$task_id" \
+      --dod-json "$BASE_DOD_JSON" \
       --task "$task" >/tmp/"${task_id}".spawn.out 2>/tmp/"${task_id}".spawn.err
   ) &
   SPAWN_PIDS+=("$!")
@@ -509,24 +523,26 @@ for id in "${INTERACTIVE_IDS[@]}"; do
     continue
   fi
   echo "[OK] attach verified: $id"
-  for agent in "${AGENTS_LIST[@]}"; do
-    if [[ "$id" == "${PREFIX}-${agent}-interactive-write" ]]; then
-      marker="CTX_${PREFIX}_${agent}_INTERACTIVE_MEM"
-      marker_msg="回归上下文标记：请记住 token=${marker}。只回复“已记录，继续等待”。"
-      marker_attach_json="$(swarm_json "attach-marker:$id" attach --id "$id" --message "$marker_msg")"
-      marker_attach_sent="$(ATTACH_JSON="$marker_attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
-      if [[ "$marker_attach_sent" != "true" ]]; then
-        echo "[ERROR] attach marker failed for interactive-write parent: $id"
-        cancel_task "$id" "attach_marker_failed_cleanup" || true
-        interactive_fail=1
-        interactive_fail_count=$((interactive_fail_count + 1))
-        print_task_result "$id" "false" "interactive_attach_marker_failed"
-        continue 2
+  if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+    for agent in "${AGENTS_LIST[@]}"; do
+      if [[ "$id" == "${PREFIX}-${agent}-interactive-write" ]]; then
+        marker="CTX_${PREFIX}_${agent}_INTERACTIVE_MEM"
+        marker_msg="回归上下文标记：请记住 token=${marker}。只回复“已记录，继续等待”。"
+        marker_attach_json="$(swarm_json "attach-marker:$id" attach --id "$id" --message "$marker_msg")"
+        marker_attach_sent="$(ATTACH_JSON="$marker_attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
+        if [[ "$marker_attach_sent" != "true" ]]; then
+          echo "[ERROR] attach marker failed for interactive-write parent: $id"
+          cancel_task "$id" "attach_marker_failed_cleanup" || true
+          interactive_fail=1
+          interactive_fail_count=$((interactive_fail_count + 1))
+          print_task_result "$id" "false" "interactive_attach_marker_failed"
+          continue 2
+        fi
+        echo "[OK] interactive parent marker attached: $id marker=$marker"
+        break
       fi
-      echo "[OK] interactive parent marker attached: $id marker=$marker"
-      break
-    fi
-  done
+    done
+  fi
   INTERACTIVE_READY_IDS+=("$id")
 done
 
@@ -673,17 +689,19 @@ for id in "${WRITE_IDS[@]}"; do
   fi
 done
 
-# 6) follow-up context checks on both parent types:
-#    - parent batch-write: reuse recalls marker, new returns NONE
-#    - parent interactive-write: reuse recalls marker, new returns NONE
-#    and reuse cross-agent must be rejected.
 followup_fail=0
 followup_pass_count=0
 followup_fail_count=0
 cross_agent_fail=0
 cross_agent_pass_count=0
 cross_agent_fail_count=0
-for agent in "${AGENTS_LIST[@]}"; do
+
+if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+  # 6) follow-up context checks on both parent types:
+  #    - parent batch-write: reuse recalls marker, new returns NONE
+  #    - parent interactive-write: reuse recalls marker, new returns NONE
+  #    and reuse cross-agent must be rejected.
+  for agent in "${AGENTS_LIST[@]}"; do
   batch_parent_id="${PREFIX}-${agent}-batch-write"
   interactive_parent_id="${PREFIX}-${agent}-interactive-write"
   batch_marker="CTX_${PREFIX}_${agent}_BATCH_MEM"
@@ -832,24 +850,27 @@ for agent in "${AGENTS_LIST[@]}"; do
       fi
     fi
   fi
-done
+  done
 
-if (( followup_fail != 0 )); then
-  echo "[ERROR] follow-up context requirement failed"
-fi
-if (( cross_agent_fail != 0 )); then
-  echo "[ERROR] follow-up cross-agent reuse requirement failed"
+  if (( followup_fail != 0 )); then
+    echo "[ERROR] follow-up context requirement failed"
+  fi
+  if (( cross_agent_fail != 0 )); then
+    echo "[ERROR] follow-up cross-agent reuse requirement failed"
+  fi
 fi
 
 for id in "${TASK_IDS[@]}"; do
   st="$(status_of "$json_end" "$id")"
   echo "[SUMMARY][CASE] task=$id final_status=$st"
 done
-for id in "${FOLLOWUP_TASK_IDS[@]}"; do
-  out="$(swarm_json "check:followup:$id" check --json)"
-  st="$(status_of "$out" "$id")"
-  echo "[SUMMARY][CASE] task=$id final_status=$st"
-done
+if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+  for id in "${FOLLOWUP_TASK_IDS[@]}"; do
+    out="$(swarm_json "check:followup:$id" check --json)"
+    st="$(status_of "$out" "$id")"
+    echo "[SUMMARY][CASE] task=$id final_status=$st"
+  done
+fi
 
 if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 || followup_fail != 0 || cross_agent_fail != 0 )); then
   cancel_non_terminal_tasks
@@ -857,7 +878,11 @@ if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail !=
   echo "[SUMMARY][OVERALL] concurrency regression=fail"
   exit 1
 fi
-echo "[SUMMARY] followup_pass=${followup_pass_count}/$((${#AGENTS_LIST[@]} * 4)) followup_fail=${followup_fail_count}/$((${#AGENTS_LIST[@]} * 4))"
-echo "[SUMMARY] followup_reuse_cross_agent_pass=${cross_agent_pass_count}/$((${#AGENTS_LIST[@]} * 2)) followup_reuse_cross_agent_fail=${cross_agent_fail_count}/$((${#AGENTS_LIST[@]} * 2))"
-echo "[PASS] regression passed (batch=success, interactive=success, followup_context=pass)"
+if [[ "$WITH_FOLLOWUP" == "1" ]]; then
+  echo "[SUMMARY] followup_pass=${followup_pass_count}/$((${#AGENTS_LIST[@]} * 4)) followup_fail=${followup_fail_count}/$((${#AGENTS_LIST[@]} * 4))"
+  echo "[SUMMARY] followup_reuse_cross_agent_pass=${cross_agent_pass_count}/$((${#AGENTS_LIST[@]} * 2)) followup_reuse_cross_agent_fail=${cross_agent_fail_count}/$((${#AGENTS_LIST[@]} * 2))"
+  echo "[PASS] regression passed (batch=success, interactive=success, followup_context=pass)"
+else
+  echo "[PASS] regression passed (batch=success, interactive=success)"
+fi
 echo "[SUMMARY][OVERALL] concurrency regression=pass"

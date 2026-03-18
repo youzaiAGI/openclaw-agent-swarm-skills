@@ -23,7 +23,7 @@ const MODE_INTERACTIVE = 'interactive';
 const MODE_BATCH = 'batch';
 const TASK_STATUSES = new Set(['running', 'pending', 'success', 'failed', 'stopped']);
 const TERMINAL_STATUSES = new Set(['success', 'failed', 'stopped']);
-const INTERACTIVE_LOG_QUIET_SEC = 60;
+const INTERACTIVE_LOG_QUIET_SEC = 30;
 const BATCH_TIMEOUT_SEC = 10_800;
 const INTERACTIVE_PENDING_TIMEOUT_SEC = 10_800;
 const REMINDER_MAX = 3;
@@ -252,12 +252,29 @@ function validateAgentCommand(agent: string): void {
   }
 }
 
-function nowId(): string {
+function normalizeIdSegment(raw: string, fallback = 'task'): string {
+  const base = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return base || fallback;
+}
+
+function repoNameForAutoId(repo: string): string {
+  const name = path.basename(path.resolve(repo));
+  return normalizeIdSegment(name, 'repo');
+}
+
+function nowId(prefix = ''): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   const rand = Math.random().toString(16).slice(2, 8);
-  return `${ts}-${rand}`;
+  const safePrefix = normalizeIdSegment(prefix, '');
+  return safePrefix ? `${safePrefix}-${ts}-${rand}` : `${ts}-${rand}`;
 }
 
 function nowIso(): string {
@@ -1118,8 +1135,7 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
   const runSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
   const alive = tmuxAlive(session);
   const paneExcerpt = alive ? stripAnsi(tmuxCapturePane(session, 180)) : '';
-  const mergedExcerpt = [cleanExcerpt, paneExcerpt].filter(Boolean).join('\n');
-  const hasRunningHint = textContainsAny(mergedExcerpt, RUNNING_MARKERS);
+  const hasRunningHint = textContainsAny(paneExcerpt, RUNNING_MARKERS);
   let convergedReason = '';
 
   let next = old as string;
@@ -1271,7 +1287,7 @@ function cmdSpawn(opts: AnyObj): void {
   if (taskId) {
     if (existing.has(taskId) || fs.existsSync(taskFilePath(taskId))) fail(`task id already exists: ${taskId}`);
   } else {
-    do taskId = nowId();
+    do taskId = nowId(repoNameForAutoId(repo));
     while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
   }
   const wtMeta = createWorktree(repo, taskId);
@@ -1319,7 +1335,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   if (taskId) {
     if (existing.has(taskId) || fs.existsSync(taskFilePath(taskId))) fail(`task id already exists: ${taskId}`);
   } else {
-    do taskId = nowId();
+    do taskId = nowId(repoNameForAutoId(repo));
     while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
   }
   const [ok, reason, wtMeta] = prepareReusedWorktree(parent);

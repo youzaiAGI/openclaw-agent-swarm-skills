@@ -164,6 +164,20 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 
 ## Commands Reference
 
+### Repository Path Resolution (Required)
+
+Before running `spawn`, resolve `--repo` using this rule:
+
+1. If user input is an existing absolute/relative directory path, use it directly.
+2. If user input is a fuzzy name (for example `yyy`), search candidate directories by basename (for example any directory named `yyy`) across likely work roots first.
+3. If exactly one git repo candidate is found, report the resolved full path and proceed.
+4. If multiple candidates are found, list numbered options and ask the user to reply with the option number only. Do not ask them to type the full path.
+5. Only run `spawn` after this repo path is confirmed.
+
+Suggested search behavior:
+- Prioritize current workspace and common project roots (such as `~/projects`, `~/work`, `~/code`) before broad home-directory scans.
+- For each candidate, verify it is a git repository before presenting it.
+
 ### spawn - Create New Task
 
 ```bash
