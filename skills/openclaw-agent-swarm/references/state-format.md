@@ -34,12 +34,16 @@ DoD is stored under `task.dod`:
 {
   "status": "pass",
   "dod_spec": {
-    "allowed_statuses": ["pending", "success"],
-    "require_clean_worktree": true,
-    "require_commits_ahead_base": false,
-    "ci_commands": ["npm test -- --run smoke"],
-    "push_command": "",
-    "pr_command": ""
+    "checks": {
+      "allowed_statuses": ["pending", "success"],
+      "require_clean_worktree": true,
+      "require_commits_ahead_base": false,
+      "ci_commands": ["npm test -- --run smoke"]
+    },
+    "actions": {
+      "push_command": "",
+      "pr_command": ""
+    }
   },
   "result": {
     "reason": "ok",

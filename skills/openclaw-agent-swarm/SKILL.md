@@ -124,11 +124,11 @@ running ↔ pending → success/failed/stopped (terminal states)
 DoD is evaluated automatically when task status transitions to `pending` or `success`:
 
 **Default DoD checks:**
-1. Current status is in `dod_spec.allowed_statuses` (default: `pending`, `success`)
+1. Current status is in `dod_spec.checks.allowed_statuses` (default: `pending`, `success`)
 2. Worktree is clean (default enabled)
 3. Optional: current branch has commits ahead of `base_branch`
-4. All `dod_spec.ci_commands` pass (if specified)
-5. On `success` only: execute `dod_spec.push_command` and `dod_spec.pr_command` (if non-empty)
+4. All `dod_spec.checks.ci_commands` pass (if specified)
+5. On `success` only: execute `dod_spec.actions.push_command` and `dod_spec.actions.pr_command` (if non-empty)
 
 **DoD status:**
 - `pass`: Task completed successfully and met all criteria
@@ -170,7 +170,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   [--agent codex|claude|gemini] \
   [--name <custom-task-id>] \
   [--ci-commands "<command-1,command-2>"] \
-  [--dod-json '{"ci_commands":["npm test"],"require_commits_ahead_base":true}'] \
+  [--dod-json '{"checks":{"ci_commands":["npm test"],"require_commits_ahead_base":true}}'] \
   [--dod-json-file "$SKILL_DIR/references/dod.json"]
 ```
 
@@ -181,7 +181,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 - `--agent`: Which agent to use (auto-detected if not specified)
 - `--name`: Custom task ID (auto-generated if not specified)
 - `--ci-commands`: CI commands for DoD (comma/newline separated; repeatable)
-- `--dod-json`: Inline DoD spec JSON object
+- `--dod-json`: Inline DoD spec JSON object (must use `checks`/`actions` fields)
 - `--dod-json-file`: Path to DoD spec JSON file
 
 **Output:** JSON with task details including `id`, `worktree`, `branch`, `tmux_session`
@@ -205,7 +205,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   [--agent codex|claude|gemini] \
   [--name <custom-task-id>] \
   [--ci-commands "<command-1,command-2>"] \
-  [--dod-json '{"allowed_statuses":["pending","success"]}'] \
+  [--dod-json '{"checks":{"allowed_statuses":["pending","success"]}}'] \
   [--dod-json-file "$SKILL_DIR/references/dod.json"]
 ```
 
@@ -454,12 +454,16 @@ Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
   "tmux_session": "swarm-batch-20260316-143022-a1b2c3",
   "task": "Add error handling to the login function",
   "dod_spec": {
-    "allowed_statuses": ["pending", "success"],
-    "require_clean_worktree": true,
-    "require_commits_ahead_base": false,
-    "ci_commands": ["npm test -- --run"],
-    "push_command": "",
-    "pr_command": ""
+    "checks": {
+      "allowed_statuses": ["pending", "success"],
+      "require_clean_worktree": true,
+      "require_commits_ahead_base": false,
+      "ci_commands": ["npm test -- --run"]
+    },
+    "actions": {
+      "push_command": "",
+      "pr_command": ""
+    }
   },
   "dod": {},
   "created_at": "2026-03-16T14:30:22.000Z",
@@ -472,11 +476,11 @@ Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
 DoD is automatically evaluated when status changes to `pending` or `success`.
 
 **Default checks:**
-1. Status is in `dod_spec.allowed_statuses`
+1. Status is in `dod_spec.checks.allowed_statuses`
 2. Worktree cleanliness check (if enabled)
 3. Ahead-of-base commit check (if enabled)
-4. All `dod_spec.ci_commands` exit with code 0
-5. On `success`: execute `push_command` and `pr_command` (if provided)
+4. All `dod_spec.checks.ci_commands` exit with code 0
+5. On `success`: execute `dod_spec.actions.push_command` and `dod_spec.actions.pr_command` (if provided)
 
 ## Advanced Usage
 
@@ -488,7 +492,7 @@ DoD is automatically evaluated when status changes to `pending` or `success`.
   --task "Implement user profile page" \
   --mode batch \
   --ci-commands "npm run lint,npm test -- --run,npm run type-check" \
-  --dod-json '{"require_commits_ahead_base":true}'
+  --dod-json '{"checks":{"require_commits_ahead_base":true}}'
 ```
 
 Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout.
@@ -573,7 +577,7 @@ This returns JSON with `changes` array showing tasks that changed status. Parse 
 
 3. **Interactive mode for exploration** - Use interactive when you're not sure exactly what needs to be done and want to guide the agent.
 
-4. **Use `ci_commands` to gate quality** - Specify `--ci-commands` so DoD can validate before completion.
+4. **Use `checks.ci_commands` to gate quality** - Specify `--ci-commands` so DoD can validate before completion.
 
 5. **Check logs when things fail** - The full agent transcript is in `~/.agents/agent-swarm/logs/<task-id>.log`
 

@@ -123,11 +123,12 @@ Tasks aren't considered complete until DoD validation passes. The swarm automati
 
 1. **Status allowed by `dod_spec`** - Default allows `pending` and `success`
 2. **Clean worktree** - No uncommitted changes (default enabled)
-3. **CI commands pass** - All commands in `dod_spec.ci_commands` must exit with code 0
+3. **CI commands pass** - All commands in `dod_spec.checks.ci_commands` must exit with code 0
 4. **Optional commit-ahead check** - Require commits ahead of base branch
-5. **`success`-only actions** - Execute `push_command` / `pr_command` if configured
+5. **`success`-only actions** - Execute `dod_spec.actions.push_command` / `dod_spec.actions.pr_command` if configured
 
 **Custom DoD spec**: Use `skills/openclaw-agent-swarm/references/dod.json` as template and pass with `--dod-json` or `--dod-json-file`.
+DoD JSON must use grouped fields under `checks` and `actions` (legacy flat keys are not supported).
 
 Only tasks with `dod.status=pass` can be published.
 
@@ -174,7 +175,7 @@ Spawn a follow-up for task abc123 reusing the session to fix the remaining issue
 - Session crashed. Check `~/.agents/agent-swarm/logs/<task_id>.log` for errors.
 
 **Can't publish - "DoD not pass"**
-- Run DoD `ci_commands` manually in the worktree to see what's failing.
+- Run DoD `dod_spec.checks.ci_commands` manually in the worktree to see what's failing.
 - Check `task.dod.result.checks` in the task JSON for details.
 
 See [Troubleshooting Guide](docs/troubleshooting.md) for more solutions.

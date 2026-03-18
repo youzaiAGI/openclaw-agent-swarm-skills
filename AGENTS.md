@@ -20,3 +20,13 @@
 - `./scripts/regression-swarm.sh`
 - `./scripts/regression-swarm.sh --suite concurrency --agents codex,claude,gemini`
 - `./scripts/regression-swarm.sh --suite dod-json --agents codex`
+
+## Regression Failure Triage (Mandatory)
+
+- For any regression failure case, do not conclude from task status alone.
+- Always inspect all three artifacts for each failed/suspicious task:
+- `~/.agents/agent-swarm/tasks/<task_id>.json` (status transitions, converged_reason, task text, dod)
+- `~/.agents/agent-swarm/logs/<task_id>.log` (actual prompt/message delivered, runtime behavior)
+- `~/.agents/agent-swarm/logs/<task_id>.exit` (exit code file existence/content/mtime for batch)
+- Compare timestamps across `task.json` and `.exit` mtime before judging timeout vs status-sync issues.
+- If `log` content mismatches `task.json.task` under concurrency, prioritize checking tmux input path for cross-task contamination.

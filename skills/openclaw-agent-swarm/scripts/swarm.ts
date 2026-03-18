@@ -305,6 +305,12 @@ function buildSelfInvokeCmd(args: string[]): string {
   return parts.map((p) => shellQuote(String(p))).join(' ');
 }
 
+function buildSelfInvokeCmdWithExitCode(taskId: string): string {
+  const parts = [SELF_EXEC_BIN, ...SELF_EXEC_ARGV, SELF_SCRIPT_PATH];
+  const quoted = parts.map((p) => shellQuote(String(p))).join(' ');
+  return `${quoted} on-exit --id ${shellQuote(taskId)} --exit-code "$ec"`;
+}
+
 function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   const wt = parent.worktree || '';
   const repo = parent.repo || '';
@@ -332,7 +338,7 @@ function buildAgentStartCommand(
   const promptQ = shellQuote(promptPath);
   const logQ = shellQuote(logPath);
   const exitQ = shellQuote(exitPath);
-  const onExitInvoke = buildSelfInvokeCmd(['on-exit', '--id', taskId, '--exit-code', '$ec']);
+  const onExitInvoke = buildSelfInvokeCmdWithExitCode(taskId);
   const onExitCmd = `${onExitInvoke} >> ${logQ} 2>&1 || true;`;
   let interactiveBase = '';
   let batchBase = '';
@@ -383,8 +389,14 @@ function buildAgentStartCommand(
 }
 
 function tmuxSendText(session: string, text: string): void {
-  run(['tmux', 'set-buffer', '--', text]);
-  run(['tmux', 'paste-buffer', '-d', '-t', session]);
+  // Avoid cross-session prompt/message mixups: the default tmux buffer is global.
+  const bufferName = `swarm-${session}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+  run(['tmux', 'set-buffer', '-b', bufferName, '--', text]);
+  try {
+    run(['tmux', 'paste-buffer', '-b', bufferName, '-d', '-t', session]);
+  } finally {
+    run(['tmux', 'delete-buffer', '-b', bufferName], undefined, false);
+  }
   sleepMs(1000);
   tmuxSendEnter(session);
 }
@@ -667,12 +679,16 @@ function normalizeCommandList(raw: any): string[] {
 
 function defaultDodSpec(): AnyObj {
   return {
-    allowed_statuses: ['pending', 'success'],
-    require_clean_worktree: true,
-    require_commits_ahead_base: false,
-    ci_commands: [],
-    push_command: '',
-    pr_command: '',
+    checks: {
+      allowed_statuses: ['pending', 'success'],
+      require_clean_worktree: true,
+      require_commits_ahead_base: false,
+      ci_commands: [],
+    },
+    actions: {
+      push_command: '',
+      pr_command: '',
+    },
   };
 }
 
@@ -706,21 +722,50 @@ function parseDodSpecJson(opts: AnyObj): AnyObj {
 }
 
 function normalizeDodSpec(input: AnyObj, inherited: AnyObj = {}): AnyObj {
+  const assertNoLegacyKeys = (spec: AnyObj, label: string): void => {
+    const legacyKeys = [
+      'allowed_statuses',
+      'require_clean_worktree',
+      'require_commits_ahead_base',
+      'ci_commands',
+      'push_command',
+      'pr_command',
+    ];
+    const hits = legacyKeys.filter((k) => Object.prototype.hasOwnProperty.call(spec, k));
+    if (hits.length) {
+      fail(`${label} uses legacy DoD keys (${hits.join(', ')}). Use dod_spec.checks.* and dod_spec.actions.*`);
+    }
+  };
+
   const defaults = defaultDodSpec();
   const base = inherited && typeof inherited === 'object' && !Array.isArray(inherited) ? inherited : {};
   const src = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const merged = { ...defaults, ...base, ...src };
+  assertNoLegacyKeys(base, 'inherited dod_spec');
+  assertNoLegacyKeys(src, 'dod_spec');
+
+  const baseChecks = base.checks && typeof base.checks === 'object' && !Array.isArray(base.checks) ? base.checks : {};
+  const srcChecks = src.checks && typeof src.checks === 'object' && !Array.isArray(src.checks) ? src.checks : {};
+  const mergedChecks = { ...defaults.checks, ...baseChecks, ...srcChecks };
+
+  const baseActions = base.actions && typeof base.actions === 'object' && !Array.isArray(base.actions) ? base.actions : {};
+  const srcActions = src.actions && typeof src.actions === 'object' && !Array.isArray(src.actions) ? src.actions : {};
+  const mergedActions = { ...defaults.actions, ...baseActions, ...srcActions };
+
   const allowed = dedupeStrings(
-    normalizeCommandList(merged.allowed_statuses).filter((s) => TASK_STATUSES.has(s)),
+    normalizeCommandList(mergedChecks.allowed_statuses).filter((s) => TASK_STATUSES.has(s)),
   );
-  const ci = dedupeStrings(normalizeCommandList(merged.ci_commands));
+  const ci = dedupeStrings(normalizeCommandList(mergedChecks.ci_commands));
   return {
-    allowed_statuses: allowed.length ? allowed : defaults.allowed_statuses,
-    require_clean_worktree: Boolean(merged.require_clean_worktree),
-    require_commits_ahead_base: Boolean(merged.require_commits_ahead_base),
-    ci_commands: ci,
-    push_command: String(merged.push_command || '').trim(),
-    pr_command: String(merged.pr_command || '').trim(),
+    checks: {
+      allowed_statuses: allowed.length ? allowed : defaults.checks.allowed_statuses,
+      require_clean_worktree: Boolean(mergedChecks.require_clean_worktree),
+      require_commits_ahead_base: Boolean(mergedChecks.require_commits_ahead_base),
+      ci_commands: ci,
+    },
+    actions: {
+      push_command: String(mergedActions.push_command || '').trim(),
+      pr_command: String(mergedActions.pr_command || '').trim(),
+    },
   };
 }
 
@@ -728,11 +773,17 @@ function buildDodSpecFromOpts(opts: AnyObj, inherited: AnyObj = {}): AnyObj {
   const jsonSpec = parseDodSpecJson(opts);
   const cliCiCommands = normalizeCommandList(opts.ciCommands);
   const merged: AnyObj = { ...jsonSpec };
-  if (Object.prototype.hasOwnProperty.call(jsonSpec, 'ci_commands') || cliCiCommands.length) {
-    merged.ci_commands = dedupeStrings([
-      ...normalizeCommandList(jsonSpec.ci_commands),
-      ...cliCiCommands,
-    ]);
+  const checksFromJson = jsonSpec?.checks && typeof jsonSpec.checks === 'object' && !Array.isArray(jsonSpec.checks)
+    ? jsonSpec.checks
+    : {};
+  if (Object.prototype.hasOwnProperty.call(checksFromJson, 'ci_commands') || cliCiCommands.length) {
+    merged.checks = {
+      ...checksFromJson,
+      ci_commands: dedupeStrings([
+        ...normalizeCommandList(checksFromJson.ci_commands),
+        ...cliCiCommands,
+      ]),
+    };
   }
   return normalizeDodSpec(merged, inherited);
 }
@@ -766,8 +817,10 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
   const worktree = String(task.worktree || '');
   const status = String(task.status || '');
   const dodSpec = ensureTaskDodSpec(task);
-  const allowedStatuses = isStringArray(dodSpec.allowed_statuses) ? dodSpec.allowed_statuses : [];
-  const ciCommands = isStringArray(dodSpec.ci_commands) ? dedupeStrings(dodSpec.ci_commands) : [];
+  const checksSpec = dodSpec.checks && typeof dodSpec.checks === 'object' ? dodSpec.checks : {};
+  const actionsSpec = dodSpec.actions && typeof dodSpec.actions === 'object' ? dodSpec.actions : {};
+  const allowedStatuses = isStringArray(checksSpec.allowed_statuses) ? checksSpec.allowed_statuses : [];
+  const ciCommands = isStringArray(checksSpec.ci_commands) ? dedupeStrings(checksSpec.ci_commands) : [];
   const result: AnyObj = {
     reason: '',
     error: '',
@@ -776,8 +829,8 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
     commits_ahead_base: null,
     checks: [] as AnyObj[],
     actions: {
-      push: { command: String(dodSpec.push_command || ''), executed: false },
-      pr: { command: String(dodSpec.pr_command || ''), executed: false },
+      push: { command: String(actionsSpec.push_command || ''), executed: false },
+      pr: { command: String(actionsSpec.pr_command || ''), executed: false },
     },
   };
   const dod: AnyObj = {
@@ -803,7 +856,7 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
     return dod;
   }
 
-  if (Boolean(dodSpec.require_clean_worktree)) {
+  if (Boolean(checksSpec.require_clean_worktree)) {
     const sp = run(['git', 'status', '--porcelain'], worktree, false);
     result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
     result.checks.push({ name: 'worktree_clean', pass: result.worktree_clean });
@@ -814,7 +867,7 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
   }
 
   const testTimeoutSec = 300;
-  if (Boolean(dodSpec.require_commits_ahead_base)) {
+  if (Boolean(checksSpec.require_commits_ahead_base)) {
     const baseBranch = String(task.base_branch || '').trim();
     if (!baseBranch) {
       result.checks.push({ name: 'commits_ahead_base', pass: false, base_branch: '' });
@@ -859,7 +912,7 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
   }
 
   if (status === 'success') {
-    const pushCommand = String(dodSpec.push_command || '').trim();
+    const pushCommand = String(actionsSpec.push_command || '').trim();
     if (pushCommand) {
       const pushRes = runShell(pushCommand, worktree, testTimeoutSec * 1000);
       result.actions.push = {
@@ -875,7 +928,7 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
         return dod;
       }
     }
-    const prCommand = String(dodSpec.pr_command || '').trim();
+    const prCommand = String(actionsSpec.pr_command || '').trim();
     if (prCommand) {
       const prRes = runShell(prCommand, worktree, testTimeoutSec * 1000);
       result.actions.pr = {
@@ -1055,13 +1108,11 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
 
   const excerpt = readLogExcerpt(logPath);
   const cleanExcerpt = stripAnsi(excerpt);
-  task.result_excerpt = cleanExcerpt;
-
-  const prevExcerpt = task._last_excerpt || '';
+  const prevExcerpt = task.result_excerpt || '';
   if (cleanExcerpt !== prevExcerpt) {
     task.last_activity_at = nowIsoStr;
-    task._last_excerpt = cleanExcerpt;
   }
+  task.result_excerpt = cleanExcerpt;
 
   const lastActivity = parseTs(task.last_activity_at || task.updated_at || task.created_at);
   const runSec = Math.max(0, Math.floor((now.getTime() - lastActivity.getTime()) / 1000));
@@ -1470,6 +1521,9 @@ function cmdCheck(opts: AnyObj): void {
       return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
     }
     if (status !== 'running') return false;
+    const exitFile = String(t.exit_file || '');
+    if (exitFile && fs.existsSync(exitFile)) return true;
+    if (!tmuxAlive(String(t.tmux_session || ''))) return true;
     const started = parseTs(t.timeout_since || t.last_activity_at || t.updated_at || t.created_at);
     const runningSec = Math.max(0, Math.floor((now.getTime() - started.getTime()) / 1000));
     return runningSec >= BATCH_TIMEOUT_SEC;
