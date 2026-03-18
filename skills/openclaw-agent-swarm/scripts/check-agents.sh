@@ -13,21 +13,23 @@ if [[ ! -f "$SWARM_TS" ]]; then
 fi
 
 if command -v bun >/dev/null 2>&1; then
-  BUN_X=(bun)
+  RUN_X=(bun)
 elif command -v npx >/dev/null 2>&1; then
-  BUN_X=(npx -y bun)
+  RUN_X=(npx -y tsx@4.20.6)
 else
-  echo "ERROR: bun runtime is required. Install bun from https://bun.sh/" >&2
+  echo "ERROR: runtime required. Install bun or npx (for tsx fallback)." >&2
   exit 1
 fi
 LOCK_FILE="${HOME}/.agents/agent-swarm/check-agents.lock"
 
 mkdir -p "$(dirname "$LOCK_FILE")"
 
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo '{"ok":true,"skipped":true,"reason":"check_locked"}'
-  exit 0
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo '{"ok":true,"skipped":true,"reason":"check_locked"}'
+    exit 0
+  fi
 fi
 
-"${BUN_X[@]}" "$SWARM_TS" check --changes-only "$@"
+"${RUN_X[@]}" "$SWARM_TS" check --changes-only "$@"

@@ -5,8 +5,8 @@ The primary entry point for OpenClaw Agent Swarm is the `swarm.ts` script. It su
 ## Common Entry Point
 
 ```bash
-if command -v bun >/dev/null 2>&1; then BUN_X=(bun); elif command -v npx >/dev/null 2>&1; then BUN_X=(npx -y bun); else echo "Install bun: https://bun.sh/" >&2; exit 1; fi
-"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts <command> [options]
+if command -v bun >/dev/null 2>&1; then RUN_X=(bun); elif command -v npx >/dev/null 2>&1; then RUN_X=(npx -y tsx@4.20.6); else echo "Install bun or npx first." >&2; exit 1; fi
+"${RUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts <command> [options]
 ```
 
 ---

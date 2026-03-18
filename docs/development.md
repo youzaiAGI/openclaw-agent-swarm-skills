@@ -9,7 +9,7 @@ To build and test from source, you need:
 - **Node.js**: >= 18
 - **npm**: (or yarn/pnpm)
 - **TypeScript**: The logic is written in `skills/openclaw-agent-swarm/scripts/swarm.ts`.
-- **Runtime**: `bun` (preferred) or `npx` (fallback to `npx -y bun`).
+- **Runtime**: `bun` (preferred) or `npx` (fallback to `npx -y tsx@4.20.6`).
 
 ## 2. Project Structure
 
@@ -21,11 +21,11 @@ To build and test from source, you need:
 1.  **Resolve runtime**:
     ```bash
     if command -v bun >/dev/null 2>&1; then
-      BUN_X=(bun)
+      RUN_X=(bun)
     elif command -v npx >/dev/null 2>&1; then
-      BUN_X=(npx -y bun)
+      RUN_X=(npx -y tsx@4.20.6)
     else
-      echo "Install bun first: https://bun.sh/" >&2
+      echo "Install bun or npx first." >&2
       exit 1
     fi
     ```
@@ -36,7 +36,7 @@ To build and test from source, you need:
 3.  **Run directly**:
     From the project root:
     ```bash
-    "${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts list
+    "${RUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts list
     ```
 
 4.  **Regression Testing**:

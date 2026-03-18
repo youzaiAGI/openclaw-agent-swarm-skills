@@ -30,7 +30,8 @@ const REMINDER_MAX = 3;
 const REMINDER_INTERVAL_SEC = 3600;
 const DOD_PASS = 'pass';
 const DOD_FAIL = 'fail';
-const SELF_NODE_BIN = process.execPath;
+const SELF_EXEC_BIN = process.execPath;
+const SELF_EXEC_ARGV = [...process.execArgv];
 const SELF_SCRIPT_PATH = path.resolve(process.argv[1] || __filename);
 
 type TaskMode = typeof MODE_INTERACTIVE | typeof MODE_BATCH;
@@ -299,6 +300,11 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+function buildSelfInvokeCmd(args: string[]): string {
+  const parts = [SELF_EXEC_BIN, ...SELF_EXEC_ARGV, SELF_SCRIPT_PATH, ...args];
+  return parts.map((p) => shellQuote(String(p))).join(' ');
+}
+
 function prepareReusedWorktree(parent: AnyObj): [boolean, string, AnyObj] {
   const wt = parent.worktree || '';
   const repo = parent.repo || '';
@@ -326,10 +332,8 @@ function buildAgentStartCommand(
   const promptQ = shellQuote(promptPath);
   const logQ = shellQuote(logPath);
   const exitQ = shellQuote(exitPath);
-  const nodeQ = shellQuote(SELF_NODE_BIN);
-  const scriptQ = shellQuote(SELF_SCRIPT_PATH);
-  const taskQ = shellQuote(taskId);
-  const onExitCmd = `${nodeQ} ${scriptQ} on-exit --id ${taskQ} --exit-code "$ec" >> ${logQ} 2>&1 || true;`;
+  const onExitInvoke = buildSelfInvokeCmd(['on-exit', '--id', taskId, '--exit-code', '$ec']);
+  const onExitCmd = `${onExitInvoke} >> ${logQ} 2>&1 || true;`;
   let interactiveBase = '';
   let batchBase = '';
   if (agent === 'codex') {

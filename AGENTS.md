@@ -1,7 +1,7 @@
 # Agent Notes
 
 - `skills/openclaw-agent-swarm/scripts/swarm.ts` is the executable source of truth.
-- Run the skill with `${BUN_X}` (`bun` preferred, `npx -y bun` fallback).
+- Run the skill with `${RUN_X}` (`bun` preferred, `npx -y tsx@4.20.6` fallback).
 
 ## Regression Checklist (Swarm)
 

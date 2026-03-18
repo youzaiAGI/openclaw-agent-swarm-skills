@@ -11,11 +11,11 @@ if [[ ! -f "$SWARM_TS" ]]; then
 fi
 
 if command -v bun >/dev/null 2>&1; then
-  BUN_X=(bun)
+  RUN_X=(bun)
 elif command -v npx >/dev/null 2>&1; then
-  BUN_X=(npx -y bun)
+  RUN_X=(npx -y tsx@4.20.6)
 else
-  echo "ERROR: bun runtime is required. Install bun from https://bun.sh/" >&2
+  echo "ERROR: runtime required. Install bun or npx (for tsx fallback)." >&2
   exit 1
 fi
 
@@ -74,7 +74,7 @@ for agent in "${AGENTS_LIST[@]}"; do
 done
 
 run_swarm() {
-  "${BUN_X[@]}" "$SWARM_TS" "$@"
+  "${RUN_X[@]}" "$SWARM_TS" "$@"
 }
 
 status_of() {

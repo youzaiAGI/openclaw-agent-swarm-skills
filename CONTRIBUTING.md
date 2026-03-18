@@ -9,7 +9,7 @@ Thank you for your interest in contributing to the project! We welcome contribut
 3.  **Code Contributions**:
     - **Fork and Clone**: Fork the repository and clone it to your local machine.
     - **Edit TypeScript**: All logic lives in `skills/openclaw-agent-swarm/scripts/swarm.ts`.
-    - **Use runtime**: Resolve `${BUN_X}` as `bun` (preferred) or `npx -y bun` (fallback), then run the script directly.
+    - **Use runtime**: Resolve `${RUN_X}` as `bun` (preferred) or `npx -y tsx@4.20.6` (fallback), then run the script directly.
     - **Run Tests**: Use `./scripts/regression-swarm-concurrency.sh` to verify your changes.
     - **Submit a Pull Request**: Provide a clear description of your changes and why they are beneficial.
 

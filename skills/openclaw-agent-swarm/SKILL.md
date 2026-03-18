@@ -39,18 +39,18 @@ Before using this skill, verify these tools are installed:
 - `git` (required)
 - `tmux` (required)
 - At least one agent: `codex`, `claude`, or `gemini` (required)
-- Runtime for executing `swarm.ts`: `bun` (preferred) or `npx` (fallback to `npx -y bun`)
+- Runtime for executing `swarm.ts`: `bun` (preferred) or `npx` (fallback to `npx -y tsx@4.20.6`)
 - Optional: `gh` (GitHub CLI) or `glab` (GitLab CLI) for automatic PR creation
 
-Resolve `${BUN_X}` runtime once in your shell:
+Resolve `${RUN_X}` runtime once in your shell:
 
 ```bash
 if command -v bun >/dev/null 2>&1; then
-  BUN_X=(bun)
+  RUN_X=(bun)
 elif command -v npx >/dev/null 2>&1; then
-  BUN_X=(npx -y bun)
+  RUN_X=(npx -y tsx@4.20.6)
 else
-  echo "bun is required. Install it: https://bun.sh/" >&2
+  echo "runtime is required. Install bun or npx (for tsx fallback)." >&2
   exit 1
 fi
 ```
@@ -67,7 +67,7 @@ fi
 ### Example: Spawn a Simple Task
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo /path/to/your/repo \
   --task "Add error handling to the login function" \
   --mode batch
@@ -86,7 +86,7 @@ This shows only tasks that changed status since last check. Use this in a heartb
 ### Example: Publish When Done
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task_id> \
   --auto-pr
 ```
@@ -110,7 +110,7 @@ This pushes the branch and creates a PR automatically.
 ### Task Status Lifecycle
 
 ```
-running → success/failed/stopped (terminal states)
+running ↔ pending → success/failed/stopped (terminal states)
 ```
 
 - `running`: Agent is actively working
@@ -163,7 +163,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 ### spawn - Create New Task
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo <path> \
   --task "<description>" \
   [--mode interactive|batch] \
@@ -188,7 +188,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 
 **Example:**
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Fix the memory leak in the cache module" \
   --mode batch \
@@ -198,7 +198,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 ### spawn-followup - Continue Failed/Stopped Task
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <parent-task-id> \
   --task "<new-instructions>" \
   --session-mode new|reuse \
@@ -220,7 +220,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 **Example:**
 ```bash
 # Parent task failed, spawn follow-up with fresh session
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from 20260316-143022-a1b2c3 \
   --task "The previous attempt failed because of missing imports. Fix the imports and try again." \
   --session-mode new
@@ -229,7 +229,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 ### attach - Send Message to Interactive Task
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id <task-id> \
   --message "<text>"
 ```
@@ -238,7 +238,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 
 **Example:**
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id 20260316-143022-a1b2c3 \
   --message "Also add unit tests for the new function"
 ```
@@ -251,11 +251,13 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
 
 Or directly:
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" check --changes-only
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" check --changes-only
 ```
 
 **What it does:**
-- Refreshes status for all non-terminal tasks
+- Refreshes status for non-terminal tasks when needed:
+  - interactive: tmux session is gone, or log has been quiet long enough
+  - batch: running duration reaches timeout threshold
 - Returns only tasks that changed status since last check
 - Updates DoD when tasks reach terminal status
 - Archives old terminal tasks (default: 24 hours)
@@ -267,13 +269,13 @@ Or directly:
 
 ```bash
 # Get specific task (always refreshes status)
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
 
 # Search by query (branch name, task description, etc.)
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --query "login"
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --query "login"
 
 # Get latest 10 tasks (no refresh)
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status
 ```
 
 **Output:** Task summary with `next_step` guidance in Chinese.
@@ -281,7 +283,7 @@ Or directly:
 ### list - Show All Active Tasks
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" list
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" list
 ```
 
 Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
@@ -289,7 +291,7 @@ Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
 ### publish - Push Branch to Remote
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task-id> \
   [--remote origin] \
   [--target-branch main] \
@@ -300,14 +302,16 @@ Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
 
 **Requirements:**
 - Task must have `dod.status=pass`
-- Task status must be `success` (batch) or `stopped` (interactive)
+- Task status must be:
+  - `success` (batch)
+  - `stopped` or `success` (interactive)
 
 **With `--auto-pr`:** Automatically creates PR/MR after successful push.
 
 ### create-pr - Create PR/MR
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" create-pr \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" create-pr \
   --id <task-id> \
   [--remote origin] \
   [--target-branch main] \
@@ -320,12 +324,14 @@ Pushes branch first, then creates PR using `gh` (GitHub) or `glab` (GitLab) if a
 ### cancel - Stop Running Task
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel \
   --id <task-id> \
   [--reason "why you're cancelling"]
 ```
 
-Kills the tmux session and sets task status to `stopped`.
+Kills the tmux session and sets task status:
+- Usually `stopped`
+- `success` when task is interactive and currently `pending`
 
 ## Common Workflows
 
@@ -333,7 +339,7 @@ Kills the tmux session and sets task status to `stopped`.
 
 ```bash
 # 1. Spawn task
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add logging to the payment processor" \
   --mode batch
@@ -342,7 +348,7 @@ Kills the tmux session and sets task status to `stopped`.
 bash "$SKILL_DIR/scripts/check-agents.sh"
 
 # 3. When it shows success, publish
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task-id> \
   --auto-pr
 ```
@@ -351,41 +357,41 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
 
 ```bash
 # 1. Spawn interactive task
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Refactor the authentication module" \
   --mode interactive
 
 # 2. Send additional instructions
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id <task-id> \
   --message "Also update the tests to match the new structure"
 
 # 3. Check status
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
 
 # 4. When satisfied, cancel to stop (triggers DoD evaluation)
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel --id <task-id>
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel --id <task-id>
 
 # 5. If DoD passes, publish
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish --id <task-id> --auto-pr
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish --id <task-id> --auto-pr
 ```
 
 ### Workflow 3: Parallel Tasks
 
 ```bash
 # Spawn multiple tasks at once
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Fix bug #123 in checkout flow" \
   --mode batch
 
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add dark mode support to settings page" \
   --mode batch
 
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Update dependencies to latest versions" \
   --mode batch
@@ -398,13 +404,13 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
 
 ```bash
 # 1. Task failed, check what happened
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <failed-task-id>
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <failed-task-id>
 
 # 2. Read the log to understand the failure
 cat ~/.agents/agent-swarm/logs/<task-id>.log | tail -100
 
 # 3. Spawn follow-up with fix instructions
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <failed-task-id> \
   --task "The test failed because of missing mock data. Add the mock data and rerun tests." \
   --session-mode new
@@ -477,7 +483,7 @@ DoD is automatically evaluated when status changes to `pending` or `success`.
 ### Custom DoD with JSON Spec
 
 ```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Implement user profile page" \
   --mode batch \
@@ -491,13 +497,13 @@ Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout
 
 ```bash
 # Original task
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add user authentication" \
   --mode interactive
 
 # After it stops, continue in same worktree with conversation history
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <task-id> \
   --task "Now add password reset functionality" \
   --session-mode reuse
@@ -530,12 +536,12 @@ Set up a cron to run `check-agents.sh` every 10-15 minutes for automatic notific
 ### Common Issues
 
 **"task is not publishable for mode/status"**
-- Check task status: `"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
+- Check task status: `"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
 - For batch mode, task must be `success`
 - For interactive mode, task must be `stopped` (use `cancel` to stop it)
 
 **"task DoD not pass"**
-- Check DoD details: `"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
+- Check DoD details: `"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
 - Look at `dod.result.reason` to see what failed
 - Common causes: uncommitted changes, no commits ahead of base, CI/push/PR command failures
 - Fix issues and spawn follow-up, or manually update DoD if appropriate
