@@ -15,7 +15,7 @@ Key capabilities:
 - Spawn tasks in isolated worktrees (no conflicts with your main branch)
 - Two modes: `interactive` (you can send follow-up messages) or `batch` (fire-and-forget)
 - Automatic status tracking and change notifications
-- Definition of Done validation (clean worktree, required tests pass)
+- Definition of Done validation (`dod_spec`: status/clean/commit/CI checks)
 - Automatic git push and PR/MR creation when tasks complete
 - Follow-up tasks that reuse or create new worktrees
 
@@ -25,7 +25,7 @@ Use this skill when you need to:
 - Run multiple coding tasks in parallel without blocking each other
 - Execute long-running tasks in the background while you continue working
 - Isolate experimental changes in separate worktrees
-- Automatically validate task completion with tests
+- Automatically validate task completion with CI commands
 - Create PRs/MRs automatically after task completion
 
 Don't use this for:
@@ -121,14 +121,14 @@ running → success/failed/stopped (terminal states)
 
 ### Definition of Done (DoD)
 
-DoD is evaluated automatically when tasks reach terminal status:
+DoD is evaluated automatically when task status transitions to `pending` or `success`:
 
 **Default DoD checks:**
-1. Task reached the correct terminal status for its mode
-   - Batch mode: must be `success`
-   - Interactive mode: must be `stopped`
-2. Worktree is clean (no uncommitted changes)
-3. All required tests pass (if any were specified)
+1. Current status is in `dod_spec.allowed_statuses` (default: `pending`, `success`)
+2. Worktree is clean (default enabled)
+3. Optional: current branch has commits ahead of `base_branch`
+4. All `dod_spec.ci_commands` pass (if specified)
+5. On `success` only: execute `dod_spec.push_command` and `dod_spec.pr_command` (if non-empty)
 
 **DoD status:**
 - `pass`: Task completed successfully and met all criteria
@@ -155,7 +155,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 
 - Main script: `$SKILL_DIR/scripts/swarm.ts`
 - Check wrapper: `$SKILL_DIR/scripts/check-agents.sh`
-- DoD rules: `$SKILL_DIR/references/dod.md` (optional semantic rules)
+- DoD spec example: `$SKILL_DIR/references/dod.json`
 - State format: `$SKILL_DIR/references/state-format.md` (JSON schemas)
 
 ## Commands Reference
@@ -169,8 +169,9 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   [--mode interactive|batch] \
   [--agent codex|claude|gemini] \
   [--name <custom-task-id>] \
-  [--required-test "<command>"] \
-  [--required-test "<another-command>"]
+  [--ci-commands "<command-1,command-2>"] \
+  [--dod-json '{"ci_commands":["npm test"],"require_commits_ahead_base":true}'] \
+  [--dod-json-file "$SKILL_DIR/references/dod.json"]
 ```
 
 **Parameters:**
@@ -179,7 +180,9 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 - `--mode`: `batch` (default) or `interactive`
 - `--agent`: Which agent to use (auto-detected if not specified)
 - `--name`: Custom task ID (auto-generated if not specified)
-- `--required-test`: Test command that must pass for DoD (can specify multiple)
+- `--ci-commands`: CI commands for DoD (comma/newline separated; repeatable)
+- `--dod-json`: Inline DoD spec JSON object
+- `--dod-json-file`: Path to DoD spec JSON file
 
 **Output:** JSON with task details including `id`, `worktree`, `branch`, `tmux_session`
 
@@ -189,7 +192,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   --repo ~/projects/myapp \
   --task "Fix the memory leak in the cache module" \
   --mode batch \
-  --required-test "npm test -- --run"
+  --ci-commands "npm run lint,npm test -- --run"
 ```
 
 ### spawn-followup - Continue Failed/Stopped Task
@@ -201,7 +204,9 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   --session-mode new|reuse \
   [--agent codex|claude|gemini] \
   [--name <custom-task-id>] \
-  [--required-test "<command>"]
+  [--ci-commands "<command-1,command-2>"] \
+  [--dod-json '{"allowed_statuses":["pending","success"]}'] \
+  [--dod-json-file "$SKILL_DIR/references/dod.json"]
 ```
 
 **Parameters:**
@@ -210,7 +215,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 - `--session-mode`: `new` (fresh session) or `reuse` (continue conversation) (required)
 - `--agent`: Agent to use (for `new` mode; `reuse` must match parent)
 - `--name`: Custom task ID (auto-generated if not specified)
-- `--required-test`: Override parent's required tests
+- `--ci-commands`: Extra/override CI commands merged into follow-up `dod_spec`
 
 **Example:**
 ```bash
@@ -453,7 +458,14 @@ Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
   "base_branch": "main",
   "tmux_session": "swarm-batch-20260316-143022-a1b2c3",
   "task": "Add error handling to the login function",
-  "required_tests": ["npm test -- --run"],
+  "dod_spec": {
+    "allowed_statuses": ["pending", "success"],
+    "require_clean_worktree": true,
+    "require_commits_ahead_base": false,
+    "ci_commands": ["npm test -- --run"],
+    "push_command": "",
+    "pr_command": ""
+  },
   "dod": {},
   "created_at": "2026-03-16T14:30:22.000Z",
   "updated_at": "2026-03-16T14:30:22.000Z"
@@ -462,36 +474,29 @@ Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
 
 ### DoD Evaluation
 
-DoD is automatically evaluated when tasks reach terminal status:
-
-**Batch mode:** Evaluated when status becomes `success`
-**Interactive mode:** Evaluated when status becomes `stopped`
-
-If task reaches `failed` or wrong terminal status, DoD automatically fails.
+DoD is automatically evaluated when status changes to `pending` or `success`.
 
 **Default checks:**
-1. Status is correct for mode (`success` for batch, `stopped` for interactive)
-2. Worktree has no uncommitted changes (`git status --porcelain` is empty)
-3. All `--required-test` commands exit with code 0
-
-**Custom DoD rules:**
-Add semantic rules to `$SKILL_DIR/references/dod.md` (e.g., "must push to remote", "must have new commits"). The caller runtime is responsible for evaluating these and calling `update-dod`.
+1. Status is in `dod_spec.allowed_statuses`
+2. Worktree cleanliness check (if enabled)
+3. Ahead-of-base commit check (if enabled)
+4. All `dod_spec.ci_commands` exit with code 0
+5. On `success`: execute `push_command` and `pr_command` (if provided)
 
 ## Advanced Usage
 
-### Custom DoD with Required Tests
+### Custom DoD with JSON Spec
 
 ```bash
 "${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Implement user profile page" \
   --mode batch \
-  --required-test "npm run lint" \
-  --required-test "npm test -- --run" \
-  --required-test "npm run type-check"
+  --ci-commands "npm run lint,npm test -- --run,npm run type-check" \
+  --dod-json '{"require_commits_ahead_base":true}'
 ```
 
-Each test must pass for DoD to succeed. Tests run with 5-minute timeout.
+Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout.
 
 ### Reusing Worktrees for Follow-ups
 
@@ -543,7 +548,7 @@ Set up a cron to run `check-agents.sh` every 10-15 minutes for automatic notific
 **"task DoD not pass"**
 - Check DoD details: `"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
 - Look at `dod.result.reason` to see what failed
-- Common causes: uncommitted changes, test failures
+- Common causes: uncommitted changes, no commits ahead of base, CI/push/PR command failures
 - Fix issues and spawn follow-up, or manually update DoD if appropriate
 
 **"attach_not_supported_in_batch_mode"**
@@ -573,7 +578,7 @@ This returns JSON with `changes` array showing tasks that changed status. Parse 
 
 3. **Interactive mode for exploration** - Use interactive when you're not sure exactly what needs to be done and want to guide the agent.
 
-4. **Required tests catch issues early** - Specify `--required-test` commands to validate the work before considering it done.
+4. **Use `ci_commands` to gate quality** - Specify `--ci-commands` so DoD can validate before completion.
 
 5. **Check logs when things fail** - The full agent transcript is in `~/.agents/agent-swarm/logs/<task-id>.log`
 
@@ -592,6 +597,6 @@ This returns JSON with `changes` array showing tasks that changed status. Parse 
 
 ## Reference Files
 
-For detailed schemas and additional DoD rules:
+For detailed schemas and DoD examples:
 - `$SKILL_DIR/references/state-format.md` - JSON structure documentation
-- `$SKILL_DIR/references/dod.md` - Custom semantic DoD rules (optional)
+- `$SKILL_DIR/references/dod.json` - DoD spec example

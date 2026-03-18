@@ -20,9 +20,25 @@ else
 fi
 command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
-command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 1; }
-command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
-command -v gemini >/dev/null 2>&1 || { echo "ERROR: gemini is required" >&2; exit 1; }
+
+AGENTS_RAW="${AGENTS:-codex,claude,gemini}"
+IFS=',' read -r -a AGENTS_INPUT <<< "$AGENTS_RAW"
+declare -a AGENTS_LIST=()
+for item in "${AGENTS_INPUT[@]}"; do
+  agent="${item//[[:space:]]/}"
+  [[ -z "$agent" ]] && continue
+  case "$agent" in
+    codex|claude|gemini) AGENTS_LIST+=("$agent") ;;
+    *) echo "ERROR: unsupported agent in AGENTS: $agent (allowed: codex,claude,gemini)" >&2; exit 1 ;;
+  esac
+done
+if [[ "${#AGENTS_LIST[@]}" -eq 0 ]]; then
+  echo "ERROR: no valid agents selected. Set AGENTS like: codex,gemini" >&2
+  exit 1
+fi
+for agent in "${AGENTS_LIST[@]}"; do
+  command -v "$agent" >/dev/null 2>&1 || { echo "ERROR: $agent is required (selected via AGENTS)" >&2; exit 1; }
+done
 
 run_swarm() {
   "${BUN_X[@]}" "$SWARM_TS" "$@"
@@ -46,9 +62,10 @@ trap cleanup EXIT
 
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
-echo "[INFO] workload: 12 tasks (codex/claude/gemini x batch/interactive x read/write)"
+echo "[INFO] agents: ${AGENTS_LIST[*]}"
+echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 4)) tasks (${AGENTS_LIST[*]} x batch/interactive x read/write)"
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
-echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require stopped"
+echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require success"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
 
 git -C "$TMP_REPO" init -q
@@ -61,7 +78,7 @@ git -C "$TMP_REPO" add README.md
 git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
-for agent in codex claude gemini; do
+for agent in "${AGENTS_LIST[@]}"; do
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "ro" "-" "-" \
     "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
@@ -271,12 +288,13 @@ validate_task_has_commit() {
 cancel_task() {
   local id="$1"
   local reason="$2"
+  local expected_statuses="${3:-stopped}"
   local out
   out="$(run_swarm cancel --id "$id" --reason "$reason")"
   local ok
-  ok="$(CANCEL_JSON="$out" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const ok=(Boolean(d.cancelled)&&String(d.status||"")==="stopped")||Boolean(d.already_terminal);process.stdout.write(String(ok));')"
+  ok="$(CANCEL_JSON="$out" EXPECTED_STATUSES="$expected_statuses" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const expected=String(process.env.EXPECTED_STATUSES||"stopped").split(",").map(s=>s.trim()).filter(Boolean);const st=String(d.status||"");const ok=(Boolean(d.cancelled)&&expected.includes(st))||Boolean(d.already_terminal);process.stdout.write(String(ok));')"
   if [[ "$ok" != "true" ]]; then
-    echo "[ERROR] cancel failed for $id: $out"
+    echo "[ERROR] cancel failed for $id (expected=${expected_statuses}): $out"
     return 1
   fi
   return 0
@@ -392,7 +410,7 @@ done
 #    - wait until log is quiet for 60s
 #    - then status must be pending
 #    - then cancel immediately
-#    - then status must become stopped
+#    - then status must become success
 
 wait_interactive_quiet_then_pending() {
   local id="$1"
@@ -436,9 +454,10 @@ wait_interactive_quiet_then_pending() {
   done
 }
 
-wait_task_stopped() {
+wait_task_status() {
   local id="$1"
-  local timeout_sec="${2:-60}"
+  local expected_status="$2"
+  local timeout_sec="${3:-60}"
   local start_ts now_ts elapsed json st
   start_ts="$(date +%s)"
   while true; do
@@ -446,12 +465,12 @@ wait_task_stopped() {
     elapsed=$((now_ts - start_ts))
     json="$(run_swarm check --json)"
     st="$(status_of "$json" "$id")"
-    if [[ "$st" == "stopped" ]]; then
+    if [[ "$st" == "$expected_status" ]]; then
       return 0
     fi
     if (( elapsed >= timeout_sec )); then
-      echo "[ERROR] timeout waiting stopped: $id => $st"
-      cancel_task "$id" "interactive_timeout_wait_stopped" || true
+      echo "[ERROR] timeout waiting ${expected_status}: $id => $st"
+      cancel_task "$id" "interactive_timeout_wait_${expected_status}" "stopped,success" || true
       return 1
     fi
     sleep "$POLL_SEC"
@@ -467,17 +486,17 @@ for id in "${INTERACTIVE_READY_IDS[@]}"; do
   fi
   echo "[OK] pending verified after quiet window: $id"
 
-  if ! cancel_task "$id" "interactive_pending_verified_then_cancel"; then
+  if ! cancel_task "$id" "interactive_pending_verified_then_cancel" "success"; then
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
     continue
   fi
-  if ! wait_task_stopped "$id" 60; then
+  if ! wait_task_status "$id" "success" 60; then
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
     continue
   fi
-  echo "[OK] stopped verified after cancel: $id"
+  echo "[OK] success verified after cancel: $id"
   interactive_pass_count=$((interactive_pass_count + 1))
 done
 
@@ -522,4 +541,4 @@ if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail !=
   echo "[FAIL] regression failed"
   exit 1
 fi
-echo "[PASS] regression passed (batch=success, interactive=stopped)"
+echo "[PASS] regression passed (batch=success, interactive=success)"

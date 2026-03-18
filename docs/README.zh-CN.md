@@ -14,7 +14,7 @@
 ```
 1. 启动 (Spawn) → 创建隔离的 Git Worktree + 在 Tmux 中启动 Agent
 2. 检查 (Check) → 监控状态，仅报告变更内容
-3. 复核 (Review) → 验证完成定义 (DoD)（测试通过、Worktree 干净）
+3. 复核 (Review) → 验证完成定义 (DoD)（状态/CI/Worktree 校验）
 4. 发布 (Publish) → 自动推送分支并创建 PR
 ```
 
@@ -121,18 +121,13 @@ claude --version  # 或 codex --version, 或 gemini --version
 
 任务只有在通过 DoD 验证后才被视为完成。Swarm 会自动检查：
 
-1. **终端状态正确** - 批处理任务必须达到 `success`，交互式任务必须为 `stopped`。
-2. **Worktree 干净** - 没有未提交的变更。
-3. **必要测试通过** - 启动时指定的所有测试命令必须以退出码 0 结束。
+1. **状态允许** - `task.status` 必须命中 `dod_spec.allowed_statuses`（默认 `pending/success`）。
+2. **Worktree 干净** - 默认要求无未提交变更。
+3. **CI 命令通过** - `dod_spec.ci_commands` 中所有命令必须返回 0。
+4. **可选 ahead 校验** - 可要求相对 base 分支存在新增 commit。
+5. **success 阶段动作** - 可执行 `push_command` / `pr_command`（为空则跳过）。
 
-**可选的语义化规则**：在 `skills/openclaw-agent-swarm/references/dod.md` 中添加自定义验收标准：
-
-```markdown
-## 语义化验收标准
-- [ ] 所有新函数必须包含 JSDoc 注释
-- [ ] 代码中不得包含硬编码的 API 密钥
-- [ ] README 必须随新功能同步更新
-```
+**DoD 规格模板**：参考 `skills/openclaw-agent-swarm/references/dod.json`，通过 `--dod-json` 或 `--dod-json-file` 传入。
 
 只有 `dod.status=pass` 的任务才可以被发布。
 
@@ -179,7 +174,7 @@ claude --version  # 或 codex --version, 或 gemini --version
 - 会话崩溃了。检查 `~/.agents/agent-swarm/logs/<task_id>.log` 以获取错误信息。
 
 **无法发布 - "DoD not pass"**
-- 在 Worktree 中手动运行必要的测试，查看失败原因。
+- 在 Worktree 中手动运行 `ci_commands`，查看失败原因。
 - 检查任务 JSON 中的 `task.dod.result.checks` 获取详细信息。
 
 更多解决方案请参阅 [问题排查手册](troubleshooting.md)。

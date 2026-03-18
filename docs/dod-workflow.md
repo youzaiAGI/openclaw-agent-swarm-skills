@@ -7,38 +7,44 @@ The Definition of Done (DoD) ensures that every task completed by an agent meets
 A DoD check results in a `pass` or `fail` status, stored within the task's JSON metadata under the `dod` field.
 
 ### Status Transitions
-- **Interactive Mode**: DoD is evaluated when a task transitions to `stopped`.
-- **Batch Mode**: DoD is evaluated when a task transitions to `success`.
-- **Failure Cases**: If a task enters a terminal `failed` or `stopped` state (in batch mode), it is marked as `fail` by default.
+- DoD is evaluated when a task transitions to `pending` or `success`.
+- `pending` runs checks only; publish actions are skipped.
+- `success` runs checks and then executes publish actions if configured.
 
 ## 2. Built-in Checks
 
-The Swarm executor performs the following automated checks:
+The Swarm executor performs checks based on `task.dod_spec`:
 
-1. **Terminal Status**: The task must have reached a final status.
-2. **Worktree Cleanliness**: The `git status --porcelain` command must return an empty output, ensuring all changes are committed.
-3. **Required Tests**: If `--required-test` was passed during `spawn`, each command must exit with code `0`.
+1. **Allowed Status**: `task.status` must be included in `dod_spec.allowed_statuses` (default: `pending`, `success`).
+2. **Worktree Cleanliness**: If `dod_spec.require_clean_worktree=true`, `git status --porcelain` must be empty.
+3. **Ahead-of-Base Commits**: If `dod_spec.require_commits_ahead_base=true`, branch must have commits ahead of `base_branch`.
+4. **CI Commands**: Each entry in `dod_spec.ci_commands` must exit with code `0`.
+5. **Publish Actions** (`success` only): run `dod_spec.push_command` and `dod_spec.pr_command` when they are non-empty.
 
-## 3. Custom Semantic Checks
+## 3. DoD Spec Input
 
-Beyond built-in checks, you can define higher-level semantic rules. These rules are typically validated by the coordinator (the agent driving the swarm).
+`spawn` and `spawn-followup` accept DoD spec input:
 
-### Example Rules
-- "The changes must follow the project's naming conventions."
-- "The documentation must be updated accordingly."
-- "There must be at least one new test file."
+- `--ci-commands "<cmd1,cmd2>"`
+- `--dod-json '<json-object>'`
+- `--dod-json-file <path>`
+
+Example:
+
+```json
+{
+  "allowed_statuses": ["pending", "success"],
+  "require_clean_worktree": true,
+  "require_commits_ahead_base": false,
+  "ci_commands": ["npm run lint", "npm test -- --run"],
+  "push_command": "",
+  "pr_command": ""
+}
+```
 
 ## 4. `update-dod` Command
 
-Once semantic validation is complete, the coordinator should use the `update-dod` command to record the result.
-
-```bash
-if command -v bun >/dev/null 2>&1; then BUN_X=(bun); elif command -v npx >/dev/null 2>&1; then BUN_X=(npx -y bun); else echo "Install bun: https://bun.sh/" >&2; exit 1; fi
-"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts update-dod \
-  --id <task-id> \
-  --status pass \
-  --result '{"summary":"All semantic checks and required tests passed","error":""}'
-```
+`update-dod` is still available for manual override or external semantic checks.
 
 ## 5. Implementation Notes
 

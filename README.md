@@ -121,18 +121,13 @@ Task xyz789 failed. Start a follow-up in the same worktree to fix the linter err
 
 Tasks aren't considered complete until DoD validation passes. The swarm automatically checks:
 
-1. **Correct terminal status** - Batch tasks must reach `success`, interactive tasks must be `stopped`
-2. **Clean worktree** - No uncommitted changes
-3. **Required tests pass** - All test commands specified at spawn must exit with code 0
+1. **Status allowed by `dod_spec`** - Default allows `pending` and `success`
+2. **Clean worktree** - No uncommitted changes (default enabled)
+3. **CI commands pass** - All commands in `dod_spec.ci_commands` must exit with code 0
+4. **Optional commit-ahead check** - Require commits ahead of base branch
+5. **`success`-only actions** - Execute `push_command` / `pr_command` if configured
 
-**Optional semantic rules**: Add custom acceptance criteria in `skills/openclaw-agent-swarm/references/dod.md`:
-
-```markdown
-## Semantic Acceptance
-- [ ] All new functions must have JSDoc comments
-- [ ] No hardcoded API keys in the code
-- [ ] README must be updated with new features
-```
+**Custom DoD spec**: Use `skills/openclaw-agent-swarm/references/dod.json` as template and pass with `--dod-json` or `--dod-json-file`.
 
 Only tasks with `dod.status=pass` can be published.
 
@@ -179,7 +174,7 @@ Spawn a follow-up for task abc123 reusing the session to fix the remaining issue
 - Session crashed. Check `~/.agents/agent-swarm/logs/<task_id>.log` for errors.
 
 **Can't publish - "DoD not pass"**
-- Run required tests manually in the worktree to see what's failing.
+- Run DoD `ci_commands` manually in the worktree to see what's failing.
 - Check `task.dod.result.checks` in the task JSON for details.
 
 See [Troubleshooting Guide](docs/troubleshooting.md) for more solutions.

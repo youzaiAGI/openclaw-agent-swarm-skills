@@ -21,7 +21,9 @@ Create a new task in a new isolated Git worktree and branch.
 - `--mode <batch|interactive>`: Execution mode. Defaults to `batch`.
 - `--agent <codex|claude|gemini>`: Specify which agent CLI to use.
 - `--name <task_id>`: (Optional) A custom name for the task.
-- `--required-test "<cmd>"`: (Optional, repeatable) Shell command(s) that must exit 0 for the task to pass DoD.
+- `--ci-commands "<cmd1,cmd2>"`: (Optional, repeatable) DoD CI command list (comma/newline separated).
+- `--dod-json "<json>"`: (Optional) Inline DoD spec object.
+- `--dod-json-file <path>`: (Optional) Path to DoD spec JSON file.
 
 ---
 
@@ -34,7 +36,9 @@ Create a new task based on an existing terminal task.
 - `--task "<text>"`: (Required) Description of the follow-up task.
 - `--session-mode <new|reuse>`: Follow-up session behavior on the reused parent worktree (`reuse` requires the parent session to be dead).
 - `--agent <codex|claude|gemini>`: (Optional) Override the parent agent.
-- `--required-test "<cmd>"`: (Optional, repeatable) New/overridden test commands.
+- `--ci-commands "<cmd1,cmd2>"`: (Optional, repeatable) Extra DoD CI command list.
+- `--dod-json "<json>"`: (Optional) Inline DoD spec overrides.
+- `--dod-json-file <path>`: (Optional) Path to DoD spec JSON file.
 
 ---
 

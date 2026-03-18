@@ -20,7 +20,7 @@
 - `repo`, `worktree`, `branch`, `base_branch`
 - `tmux_session`
 - `task`, `parent_task_id`
-- `required_tests`: `string[]`
+- `dod_spec`
 - `created_at`, `updated_at`, `last_activity_at`, `timeout_since`
 - `log`, `exit_file`, `exit_code`, `result_excerpt`
 - `converged_at`, `converged_reason`
@@ -33,16 +33,29 @@ DoD is stored under `task.dod`:
 ```json
 {
   "status": "pass",
+  "dod_spec": {
+    "allowed_statuses": ["pending", "success"],
+    "require_clean_worktree": true,
+    "require_commits_ahead_base": false,
+    "ci_commands": ["npm test -- --run smoke"],
+    "push_command": "",
+    "pr_command": ""
+  },
   "result": {
     "reason": "ok",
     "error": "",
     "terminal": true,
     "worktree_clean": true,
+    "commits_ahead_base": 1,
     "checks": [
+      { "name": "status_allowed", "pass": true },
       { "name": "worktree_clean", "pass": true }
-    ]
+    ],
+    "actions": {
+      "push": { "command": "", "executed": false },
+      "pr": { "command": "", "executed": false }
+    }
   },
-  "required_tests": ["npm test -- run smoke"],
   "updated_at": "2026-03-10T10:00:00.000Z"
 }
 ```

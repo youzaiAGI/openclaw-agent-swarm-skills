@@ -21,6 +21,7 @@ const RUNNING_MARKERS = [
 const TMUX_ENV_EXCLUDE = new Set(['TMUX', 'TMUX_PANE', 'PWD', 'OLDPWD', '_', 'SHLVL']);
 const MODE_INTERACTIVE = 'interactive';
 const MODE_BATCH = 'batch';
+const TASK_STATUSES = new Set(['running', 'pending', 'success', 'failed', 'stopped']);
 const TERMINAL_STATUSES = new Set(['success', 'failed', 'stopped']);
 const INTERACTIVE_LOG_QUIET_SEC = 60;
 const BATCH_TIMEOUT_SEC = 10_800;
@@ -559,7 +560,7 @@ function spawnInTmux(
   mode: TaskMode,
   userTask: string,
   parentTaskId = '',
-  requiredTests: string[] = [],
+  dodSpec: AnyObj = {},
   continueSession = false,
 ): AnyObj {
   ensureGlobalStateDir();
@@ -610,7 +611,7 @@ function spawnInTmux(
     base_branch: wtMeta.base_branch,
     tmux_session: session,
     task: userTask,
-    required_tests: requiredTests,
+    dod_spec: dodSpec,
     parent_task_id: parentTaskId,
     created_at: now,
     updated_at: now,
@@ -633,32 +634,152 @@ function runShell(command: string, cwd: string, timeoutMs: number): AnyObj {
   };
 }
 
-function normalizeRequiredTests(raw: any): string[] {
-  if (Array.isArray(raw)) return raw.map((x) => String(x || '').trim()).filter(Boolean);
+function dedupeStrings(input: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    const v = String(raw || '').trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function normalizeCommandList(raw: any): string[] {
+  if (Array.isArray(raw)) {
+    const arr: string[] = [];
+    for (const item of raw) {
+      const text = String(item || '');
+      const parts = text.split('\n').flatMap((line) => line.split(','));
+      arr.push(...parts);
+    }
+    return dedupeStrings(arr);
+  }
   const one = String(raw || '').trim();
-  return one ? [one] : [];
+  if (!one) return [];
+  return dedupeStrings(one.split('\n').flatMap((line) => line.split(',')));
+}
+
+function defaultDodSpec(): AnyObj {
+  return {
+    allowed_statuses: ['pending', 'success'],
+    require_clean_worktree: true,
+    require_commits_ahead_base: false,
+    ci_commands: [],
+    push_command: '',
+    pr_command: '',
+  };
+}
+
+function parseDodSpecJson(opts: AnyObj): AnyObj {
+  if (opts.dodJsonFile) {
+    const p = path.resolve(String(opts.dodJsonFile));
+    if (!fs.existsSync(p)) fail(`dod json file not found: ${p}`);
+    try {
+      const raw = fs.readFileSync(p, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        fail('dod json file must be an object');
+      }
+      return parsed;
+    } catch {
+      fail('invalid --dod-json-file content');
+    }
+  }
+  if (opts.dodJson) {
+    try {
+      const parsed = JSON.parse(String(opts.dodJson));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        fail('--dod-json must be a json object');
+      }
+      return parsed;
+    } catch {
+      fail('invalid --dod-json payload');
+    }
+  }
+  return {};
+}
+
+function normalizeDodSpec(input: AnyObj, inherited: AnyObj = {}): AnyObj {
+  const defaults = defaultDodSpec();
+  const base = inherited && typeof inherited === 'object' && !Array.isArray(inherited) ? inherited : {};
+  const src = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const merged = { ...defaults, ...base, ...src };
+  const allowed = dedupeStrings(
+    normalizeCommandList(merged.allowed_statuses).filter((s) => TASK_STATUSES.has(s)),
+  );
+  const ci = dedupeStrings(normalizeCommandList(merged.ci_commands));
+  return {
+    allowed_statuses: allowed.length ? allowed : defaults.allowed_statuses,
+    require_clean_worktree: Boolean(merged.require_clean_worktree),
+    require_commits_ahead_base: Boolean(merged.require_commits_ahead_base),
+    ci_commands: ci,
+    push_command: String(merged.push_command || '').trim(),
+    pr_command: String(merged.pr_command || '').trim(),
+  };
+}
+
+function buildDodSpecFromOpts(opts: AnyObj, inherited: AnyObj = {}): AnyObj {
+  const jsonSpec = parseDodSpecJson(opts);
+  const cliCiCommands = normalizeCommandList(opts.ciCommands);
+  const merged: AnyObj = { ...jsonSpec };
+  if (Object.prototype.hasOwnProperty.call(jsonSpec, 'ci_commands') || cliCiCommands.length) {
+    merged.ci_commands = dedupeStrings([
+      ...normalizeCommandList(jsonSpec.ci_commands),
+      ...cliCiCommands,
+    ]);
+  }
+  return normalizeDodSpec(merged, inherited);
+}
+
+function isStringArray(v: any): boolean {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string');
+}
+
+function ensureTaskDodSpec(task: AnyObj): AnyObj {
+  const current = task?.dod_spec && typeof task.dod_spec === 'object' ? task.dod_spec : {};
+  const normalized = normalizeDodSpec(current);
+  task.dod_spec = normalized;
+  return normalized;
 }
 
 function dodPassed(dod: AnyObj): boolean {
   return String(dod?.status || '') === DOD_PASS;
 }
 
+function clearDod(task: AnyObj): void {
+  task.dod = {};
+}
+
+function ensureTaskSessionClosed(task: AnyObj): void {
+  const session = String(task.tmux_session || '');
+  if (!session) return;
+  tmuxCloseSession(session);
+}
+
 function evaluateDefaultDod(task: AnyObj): AnyObj {
   const worktree = String(task.worktree || '');
   const status = String(task.status || '');
-  const mode = normalizeMode(task.mode);
-  const requiredTests = normalizeRequiredTests(task.required_tests);
+  const dodSpec = ensureTaskDodSpec(task);
+  const allowedStatuses = isStringArray(dodSpec.allowed_statuses) ? dodSpec.allowed_statuses : [];
+  const ciCommands = isStringArray(dodSpec.ci_commands) ? dedupeStrings(dodSpec.ci_commands) : [];
   const result: AnyObj = {
     reason: '',
     error: '',
     terminal: isTerminalStatus(status),
-    worktree_clean: false,
+    worktree_clean: null,
+    commits_ahead_base: null,
     checks: [] as AnyObj[],
+    actions: {
+      push: { command: String(dodSpec.push_command || ''), executed: false },
+      pr: { command: String(dodSpec.pr_command || ''), executed: false },
+    },
   };
   const dod: AnyObj = {
     status: DOD_FAIL,
     result,
-    required_tests: requiredTests,
+    dod_spec: dodSpec,
     updated_at: nowIso(),
   };
 
@@ -666,33 +787,59 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
     result.reason = 'worktree_missing';
     return dod;
   }
-  if (!result.terminal) {
-    result.reason = `status_not_terminal:${status || 'unknown'}`;
-    return dod;
-  }
-  const statusAllowed = (mode === MODE_INTERACTIVE && status === 'stopped')
-    || (mode === MODE_BATCH && status === 'success');
+  const statusAllowed = allowedStatuses.includes(status);
+  result.checks.push({
+    name: 'status_allowed',
+    pass: statusAllowed,
+    status,
+    allowed_statuses: allowedStatuses,
+  });
   if (!statusAllowed) {
-    result.reason = `status_not_allowed_for_default_dod:${status || 'unknown'}`;
+    result.reason = `status_not_allowed:${status || 'unknown'}`;
     return dod;
   }
-  const sp = run(['git', 'status', '--porcelain'], worktree, false);
-  result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
-  result.checks.push({ name: 'worktree_clean', pass: result.worktree_clean });
 
-  if (!result.worktree_clean) {
-    result.reason = 'worktree_not_clean';
-    return dod;
+  if (Boolean(dodSpec.require_clean_worktree)) {
+    const sp = run(['git', 'status', '--porcelain'], worktree, false);
+    result.worktree_clean = sp.code === 0 && sp.stdout.trim() === '';
+    result.checks.push({ name: 'worktree_clean', pass: result.worktree_clean });
+    if (!result.worktree_clean) {
+      result.reason = 'worktree_not_clean';
+      return dod;
+    }
   }
 
   const testTimeoutSec = 300;
-  for (const cmd of requiredTests) {
+  if (Boolean(dodSpec.require_commits_ahead_base)) {
+    const baseBranch = String(task.base_branch || '').trim();
+    if (!baseBranch) {
+      result.checks.push({ name: 'commits_ahead_base', pass: false, base_branch: '' });
+      result.reason = 'base_branch_missing_for_commit_check';
+      return dod;
+    }
+    const cpAhead = run(['git', 'rev-list', '--count', `${baseBranch}..HEAD`], worktree, false);
+    const ahead = cpAhead.code === 0 ? Number.parseInt((cpAhead.stdout || '0').trim(), 10) : 0;
+    const passAhead = Number.isFinite(ahead) && ahead > 0;
+    result.commits_ahead_base = Number.isFinite(ahead) ? ahead : 0;
+    result.checks.push({
+      name: 'commits_ahead_base',
+      pass: passAhead,
+      base_branch: baseBranch,
+      count: result.commits_ahead_base,
+    });
+    if (!passAhead) {
+      result.reason = 'no_commits_ahead_base';
+      return dod;
+    }
+  }
+
+  for (const cmd of ciCommands) {
     const startedAt = Date.now();
     const cp = runShell(cmd, worktree, testTimeoutSec * 1000);
     const durationMs = Date.now() - startedAt;
     const pass = cp.code === 0;
     result.checks.push({
-      name: 'required_test',
+      name: 'ci_command',
       cmd,
       pass,
       exit_code: cp.code,
@@ -701,9 +848,44 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
       output: (cp.stdout || cp.stderr || '').slice(-2000),
     });
     if (!pass) {
-      result.reason = 'required_tests_failed';
-      if (cp.timed_out) result.error = `required_test_timeout:${cmd}`;
+      result.reason = 'ci_commands_failed';
+      if (cp.timed_out) result.error = `ci_command_timeout:${cmd}`;
       return dod;
+    }
+  }
+
+  if (status === 'success') {
+    const pushCommand = String(dodSpec.push_command || '').trim();
+    if (pushCommand) {
+      const pushRes = runShell(pushCommand, worktree, testTimeoutSec * 1000);
+      result.actions.push = {
+        command: pushCommand,
+        executed: true,
+        exit_code: pushRes.code,
+        timed_out: Boolean(pushRes.timed_out),
+        output: (pushRes.stdout || pushRes.stderr || '').slice(-2000),
+      };
+      if (pushRes.code !== 0) {
+        result.reason = 'push_command_failed';
+        if (pushRes.timed_out) result.error = `push_command_timeout:${pushCommand}`;
+        return dod;
+      }
+    }
+    const prCommand = String(dodSpec.pr_command || '').trim();
+    if (prCommand) {
+      const prRes = runShell(prCommand, worktree, testTimeoutSec * 1000);
+      result.actions.pr = {
+        command: prCommand,
+        executed: true,
+        exit_code: prRes.code,
+        timed_out: Boolean(prRes.timed_out),
+        output: (prRes.stdout || prRes.stderr || '').slice(-2000),
+      };
+      if (prRes.code !== 0) {
+        result.reason = 'pr_command_failed';
+        if (prRes.timed_out) result.error = `pr_command_timeout:${prCommand}`;
+        return dod;
+      }
     }
   }
 
@@ -712,38 +894,13 @@ function evaluateDefaultDod(task: AnyObj): AnyObj {
   return dod;
 }
 
-function buildDodFailedByStatus(task: AnyObj, status: string): AnyObj {
-  return {
-    status: DOD_FAIL,
-    result: {
-      reason: `status_forced_fail:${status || 'unknown'}`,
-      error: '',
-      terminal: isTerminalStatus(status),
-      worktree_clean: false,
-      checks: [],
-    },
-    required_tests: normalizeRequiredTests(task.required_tests),
-    updated_at: nowIso(),
-  };
-}
-
-function applyDodOnStatusTransition(task: AnyObj, oldStatus: string, nextStatus: string, mode: TaskMode): void {
+function applyDodOnStatusTransition(task: AnyObj, oldStatus: string, nextStatus: string, _mode: TaskMode): void {
   if (oldStatus === nextStatus) return;
-  if (mode === MODE_INTERACTIVE && nextStatus === 'failed') {
-    task.dod = buildDodFailedByStatus(task, nextStatus);
-    return;
-  }
-  if (mode === MODE_INTERACTIVE && nextStatus === 'stopped') {
+  if (nextStatus === 'pending' || nextStatus === 'success') {
     task.dod = evaluateDefaultDod(task);
     return;
   }
-  if (mode === MODE_BATCH && nextStatus === 'success') {
-    task.dod = evaluateDefaultDod(task);
-    return;
-  }
-  if (mode === MODE_BATCH && (nextStatus === 'failed' || nextStatus === 'stopped')) {
-    task.dod = buildDodFailedByStatus(task, nextStatus);
-  }
+  clearDod(task);
 }
 
 function parseRemoteUrl(remoteUrl: string): AnyObj {
@@ -794,7 +951,7 @@ function buildManualPrUrl(forgeInfo: AnyObj, sourceBranch: string, targetBranch:
 function ensurePublishable(task: AnyObj): void {
   const mode = normalizeMode(task.mode);
   const status = String(task.status || '');
-  const statusAllowed = (mode === MODE_INTERACTIVE && status === 'stopped')
+  const statusAllowed = (mode === MODE_INTERACTIVE && (status === 'stopped' || status === 'success'))
     || (mode === MODE_BATCH && status === 'success');
   if (!statusAllowed) {
     fail(`task is not publishable for mode/status: mode=${mode} status=${status || 'unknown'}`);
@@ -963,6 +1120,10 @@ function updateStatus(task: AnyObj, opts: AnyObj): AnyObj {
     if (convergedReason) task.converged_reason = convergedReason;
   }
   applyDodOnStatusTransition(task, old, next, mode);
+  if (next !== old && isTerminalStatus(next)) {
+    // Always attempt one more cleanup at terminal transition to avoid leaked sessions.
+    ensureTaskSessionClosed(task);
+  }
   return task;
 }
 
@@ -1031,6 +1192,7 @@ function taskSummary(task: AnyObj): AnyObj {
     branch: task.branch,
     tmux_session: task.tmux_session,
     status,
+    dod_spec: normalizeDodSpec(task.dod_spec || {}),
     dod: task.dod || {},
     publish,
     pr,
@@ -1041,7 +1203,6 @@ function taskSummary(task: AnyObj): AnyObj {
 
 function cmdSpawn(opts: AnyObj): void {
   const mode = normalizeMode(opts.mode);
-  const requiredTests = normalizeRequiredTests(opts.requiredTest);
   const repo = path.resolve(opts.repo);
   if (!isGitRepo(repo)) fail(`target is not a git repository: ${repo}`);
   const tools = detectTools();
@@ -1059,7 +1220,8 @@ function cmdSpawn(opts: AnyObj): void {
     while (existing.has(taskId) || fs.existsSync(taskFilePath(taskId)));
   }
   const wtMeta = createWorktree(repo, taskId);
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, '', requiredTests);
+  const dodSpec = buildDodSpecFromOpts(opts);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, '', dodSpec);
   task.dod = {};
   saveTask(task);
   printJson({ ok: true, task, tools, registry: GLOBAL_TASKS_DIR });
@@ -1095,9 +1257,8 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   const repo = path.resolve(parent.repo || '');
   if (!isGitRepo(repo)) fail(`parent repo is invalid or not git: ${repo}`);
   const mode = normalizeMode(parent.mode || MODE_BATCH);
-  const requiredTests = normalizeRequiredTests(
-    opts.requiredTest !== undefined ? opts.requiredTest : parent.required_tests,
-  );
+  const inheritedDodSpec = normalizeDodSpec(parent.dod_spec || {});
+  const dodSpec = buildDodSpecFromOpts(opts, inheritedDodSpec);
   const existing = new Set(tasks.map((t) => String(t.id || '')));
   let taskId = String(opts.name || '').trim();
   if (taskId) {
@@ -1110,7 +1271,7 @@ function cmdSpawnFollowup(opts: AnyObj): void {
   if (!ok) fail(reason);
   const parentId = parent.id || '';
   const continueSession = sessionMode === 'reuse';
-  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, requiredTests, continueSession);
+  const task = spawnInTmux(taskId, repo, wtMeta, agent, mode, opts.task, parentId, dodSpec, continueSession);
   task.session_mode = sessionMode;
   task.dod = {};
   saveTask(task);
@@ -1166,6 +1327,7 @@ function cmdAttach(opts: AnyObj): void {
     return;
   }
   task.status = 'running';
+  clearDod(task);
   task.updated_at = nowIso();
   task.last_activity_at = task.updated_at;
   saveTask(task);
@@ -1210,8 +1372,9 @@ function cmdCancel(opts: AnyObj): void {
   }
 
   const method = 'kill_only';
+  const nextStatus = mode === MODE_INTERACTIVE && status === 'pending' ? 'success' : 'stopped';
 
-  task.status = 'stopped';
+  task.status = nextStatus;
   task.updated_at = now;
   task.last_activity_at = now;
   task.converged_at = now;
@@ -1225,7 +1388,8 @@ function cmdCancel(opts: AnyObj): void {
     session_killed: killed,
     reason,
   };
-  applyDodOnStatusTransition(task, status, 'stopped', mode);
+  applyDodOnStatusTransition(task, status, nextStatus, mode);
+  ensureTaskSessionClosed(task);
   saveTask(task);
 
   printJson({
@@ -1275,10 +1439,9 @@ function cmdOnExit(opts: AnyObj): void {
     ? `exit_file_code:${exitCode}`
     : `interactive_exit_code:${exitCode}`;
   applyDodOnStatusTransition(task, old, next, mode);
+  if (isTerminalStatus(next)) ensureTaskSessionClosed(task);
   saveTask(task);
 
-  const session = String(task.tmux_session || '');
-  if (session) tmuxCloseSession(session);
   const exitFile = String(task.exit_file || '');
   if (exitFile) {
     try {
@@ -1296,12 +1459,16 @@ function cmdCheck(opts: AnyObj): void {
   const now = new Date();
   const refreshFlags = loaded.map((t) => {
     const mode = normalizeMode(t.mode);
+    const status = String(t.status || '');
+    if (isTerminalStatus(status)) return false;
     if (mode === MODE_INTERACTIVE) {
-      if (isTerminalStatus(String(t.status || ''))) return false;
       if (!tmuxAlive(String(t.tmux_session || ''))) return true;
       return logQuietLongEnough(t, now, INTERACTIVE_LOG_QUIET_SEC);
     }
-    return true;
+    if (status !== 'running') return false;
+    const started = parseTs(t.timeout_since || t.last_activity_at || t.updated_at || t.created_at);
+    const runningSec = Math.max(0, Math.floor((now.getTime() - started.getTime()) / 1000));
+    return runningSec >= BATCH_TIMEOUT_SEC;
   });
   const tasks = loaded.map((t, idx) => (refreshFlags[idx] ? updateStatus({ ...t }, opts) : { ...t }));
 
@@ -1309,9 +1476,7 @@ function cmdCheck(opts: AnyObj): void {
     if (!refreshFlags[i]) continue;
     saveTask(tasks[i]);
   }
-  if (refreshFlags.some(Boolean)) {
-    archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
-  }
+  archiveExpiredTasks(tasks, now, Number(opts.archiveAgeSec || 86400));
   const lastRaw = loadJson<AnyObj>(GLOBAL_LAST_CHECK_PATH, {});
   const last = lastRaw && typeof lastRaw === 'object' && lastRaw.tasks && typeof lastRaw.tasks === 'object'
     ? lastRaw.tasks as Record<string, AnyObj>
@@ -1342,6 +1507,10 @@ function cmdCheck(opts: AnyObj): void {
     const sinceLastReminderSec = Math.max(0, Math.floor((now.getTime() - lastReminderTs.getTime()) / 1000));
     const needReminderByStatus = (mode === MODE_INTERACTIVE && status === 'pending' && timeoutAgeSec >= INTERACTIVE_PENDING_TIMEOUT_SEC)
       || (mode === MODE_BATCH && status === 'running' && timeoutAgeSec >= BATCH_TIMEOUT_SEC);
+    if (!needReminderByStatus) {
+      reminderCount = 0;
+      lastReminderAt = '';
+    }
     const emitReminder = needReminderByStatus
       && reminderCount < REMINDER_MAX
       && sinceLastReminderSec >= REMINDER_INTERVAL_SEC;
@@ -1357,7 +1526,7 @@ function cmdCheck(opts: AnyObj): void {
       const shouldPrompt = status === 'success' && dodPassed(t.dod || {}) && !publish.ok;
       const timeoutPrompt = emitReminder
         ? (mode === MODE_INTERACTIVE
-          ? '任务 pending 超过3小时，建议检查日志并决定是否 cancel（将转为 stopped）'
+          ? '任务 pending 超过3小时，建议检查日志并决定是否 cancel（将转为 success）'
           : '任务运行超过3小时，建议检查日志并决定是否 cancel（将转为 stopped）')
         : '';
       changes.push({
@@ -1422,7 +1591,7 @@ function cmdUpdateDod(opts: AnyObj): void {
       ...result,
       error: String((result || {}).error || ''),
     },
-    required_tests: normalizeRequiredTests(task.required_tests),
+    dod_spec: ensureTaskDodSpec(task),
     updated_at: nowIso(),
   };
   task.updated_at = nowIso();
@@ -1676,8 +1845,8 @@ function showHelp(): void {
 
 function showCommandHelp(cmd: string): void {
   const lines: Record<string, string[]> = {
-    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
-    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --session-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--required-test <cmd> ...]'],
+    spawn: ['usage: swarm.ts spawn --repo <repo> --task <task> [--mode interactive|batch] [--agent codex|claude|gemini] [--name <name>] [--ci-commands <cmds>] [--dod-json <json>|--dod-json-file <path>]'],
+    'spawn-followup': ['usage: swarm.ts spawn-followup --from <id> --task <task> --session-mode new|reuse [--agent codex|claude|gemini] [--name <name>] [--ci-commands <cmds>] [--dod-json <json>|--dod-json-file <path>]'],
     attach: ['usage: swarm.ts attach --id <id> --message <text>'],
     cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
     check: ['usage: swarm.ts check [--changes-only]'],
@@ -1712,7 +1881,9 @@ function main(): void {
         mode: optsRaw.mode,
         agent: optsRaw.agent,
         name: optsRaw.name,
-        requiredTest: optsRaw.requiredTest,
+        ciCommands: optsRaw.ciCommands,
+        dodJson: optsRaw.dodJson,
+        dodJsonFile: optsRaw.dodJsonFile,
       });
       return;
     }
@@ -1728,7 +1899,9 @@ function main(): void {
         sessionMode: String(sessionMode),
         agent: optsRaw.agent,
         name: optsRaw.name,
-        requiredTest: optsRaw.requiredTest,
+        ciCommands: optsRaw.ciCommands,
+        dodJson: optsRaw.dodJson,
+        dodJsonFile: optsRaw.dodJsonFile,
       });
       return;
     }

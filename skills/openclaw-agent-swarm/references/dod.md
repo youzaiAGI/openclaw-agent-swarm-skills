@@ -1,6 +1,7 @@
-# DoD Rules (Optional)
+# DoD Rules (Legacy Notes)
 
-This file is intentionally empty by default.
+`swarm.ts` now uses executable JSON DoD specs via `dod_spec`.
 
-Add only task-specific semantic DoD rules here when needed.
-Examples: "must push to remote", "must have new commits on current branch".
+Use `references/dod.json` as the template and pass it with:
+- `--dod-json-file <path>`
+- or `--dod-json '<json>'`
