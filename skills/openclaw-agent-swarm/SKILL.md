@@ -323,9 +323,6 @@ Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
 
 **Requirements:**
 - Task must have `dod.status=pass`
-- Task status must be:
-  - `success` (batch)
-  - `stopped` or `success` (interactive)
 
 **With `--auto-pr`:** Automatically creates PR/MR after successful push.
 
@@ -562,11 +559,6 @@ Set up a cron to run `check-agents.sh` every 10-15 minutes for automatic notific
 ## Error Handling
 
 ### Common Issues
-
-**"task is not publishable for mode/status"**
-- Check task status: `"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
-- For batch mode, task must be `success`
-- For interactive mode, task must be `stopped` (use `cancel` to stop it)
 
 **"task DoD not pass"**
 - Check DoD details: `"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
