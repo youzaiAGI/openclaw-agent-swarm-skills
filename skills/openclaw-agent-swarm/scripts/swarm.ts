@@ -1560,45 +1560,6 @@ function cmdList(): void {
   printJson({ ok: true, registry: GLOBAL_TASKS_DIR, tasks: loadTasks() });
 }
 
-function parseDodPayload(opts: AnyObj): AnyObj {
-  const status = String(opts.status || '').toLowerCase();
-  if (!status) fail('update-dod requires --status <pass|fail> [--result <json>]');
-  const payload: AnyObj = {
-    status,
-    result: {},
-  };
-  if (opts.result) {
-    try {
-      payload.result = JSON.parse(String(opts.result));
-    } catch {
-      fail('invalid --result JSON payload');
-    }
-  }
-  return payload;
-}
-
-function cmdUpdateDod(opts: AnyObj): void {
-  if (!opts.id) fail('update-dod requires --id');
-  const task = loadTaskById(String(opts.id));
-  if (!task) fail(`task not found: ${opts.id}`);
-  const payload = parseDodPayload(opts);
-  const status = String(payload.status || '').toLowerCase();
-  if (![DOD_PASS, DOD_FAIL].includes(status)) fail(`invalid dod status: ${status}`);
-  const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
-  task.dod = {
-    status,
-    result: {
-      ...result,
-      error: String((result || {}).error || ''),
-    },
-    dod_spec: ensureTaskDodSpec(task),
-    updated_at: nowIso(),
-  };
-  task.updated_at = nowIso();
-  saveTask(task);
-  printJson({ ok: true, id: task.id, dod: task.dod });
-}
-
 function cmdStatus(opts: AnyObj): void {
   const tasks = loadTasks();
   if (!tasks.length) {
@@ -1833,7 +1794,6 @@ function showHelp(): void {
       '  cancel',
       '  check',
       '  status',
-      '  update-dod',
       '  publish',
       '  create-pr',
       '  list',
@@ -1851,7 +1811,6 @@ function showCommandHelp(cmd: string): void {
     cancel: ['usage: swarm.ts cancel --id <id> [--reason <text>]'],
     check: ['usage: swarm.ts check [--changes-only]'],
     status: ['usage: swarm.ts status [--id <id>|--query <q>]'],
-    'update-dod': ['usage: swarm.ts update-dod --id <id> --status pass|fail [--result <json>]'],
     'on-exit': ['usage: swarm.ts on-exit --id <id> --exit-code <int>'],
     publish: ['usage: swarm.ts publish --id <id> [--remote origin] [--target-branch <branch>] [--auto-pr] [--title <t>] [--body <b>]'],
     'create-pr': ['usage: swarm.ts create-pr --id <id> [--remote origin] [--target-branch <branch>] [--title <t>] [--body <b>]'],
@@ -1921,15 +1880,6 @@ function main(): void {
     }
     if (cmd === 'status') {
       cmdStatus({ ...optsRaw, id: optsRaw.id, query: optsRaw.query });
-      return;
-    }
-    if (cmd === 'update-dod') {
-      cmdUpdateDod({
-        id: optsRaw.id,
-        status: optsRaw.status,
-        result: optsRaw.result,
-        resultFile: optsRaw.resultFile,
-      });
       return;
     }
     if (cmd === 'on-exit') {

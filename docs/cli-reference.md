@@ -77,17 +77,6 @@ Monitor task progress and state transitions.
 
 ---
 
-## ✅ `update-dod`
-
-Update the Definition of Done (DoD) status for a task.
-
-### Options
-- `--id <task_id>`: (Required) The target task ID.
-- `--status <pass|fail>`: (Required) The resulting DoD status.
-- `--result <json_string>`: (Optional) Additional result metadata.
-
----
-
 ## 🚢 `publish` & `create-pr`
 
 Manage code promotion after task completion.

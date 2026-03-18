@@ -22,6 +22,36 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1;
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 
 AGENTS_RAW="${AGENTS:-codex,claude,gemini}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/regression-swarm-concurrency.sh [--agents codex,claude,gemini]
+
+Options:
+  --agents  Comma-separated agent list. Default: codex,claude,gemini (or AGENTS env)
+  -h,--help Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agents)
+      [[ $# -ge 2 ]] || { echo "ERROR: --agents requires a value" >&2; exit 1; }
+      AGENTS_RAW="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
 IFS=',' read -r -a AGENTS_INPUT <<< "$AGENTS_RAW"
 declare -a AGENTS_LIST=()
 for item in "${AGENTS_INPUT[@]}"; do

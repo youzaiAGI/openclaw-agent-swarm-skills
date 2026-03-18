@@ -42,11 +42,7 @@ Example:
 }
 ```
 
-## 4. `update-dod` Command
-
-`update-dod` is still available for manual override or external semantic checks.
-
-## 5. Implementation Notes
+## 4. Implementation Notes
 
 - If a system error occurs during DoD evaluation, it should be recorded in the `dod.result.error` field.
 - The `publish` command requires a passing DoD status before it will allow code to be pushed to the remote.

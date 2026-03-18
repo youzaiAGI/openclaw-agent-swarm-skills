@@ -23,40 +23,59 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1;
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "ERROR: tmux is required" >&2; exit 1; }
 
-if command -v codex >/dev/null 2>&1; then
-  AGENT="codex"
-elif command -v claude >/dev/null 2>&1; then
-  AGENT="claude"
-elif command -v gemini >/dev/null 2>&1; then
-  AGENT="gemini"
-else
-  echo "ERROR: one of codex/claude/gemini is required" >&2
+AGENTS_RAW="${AGENTS:-codex,claude,gemini}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/regression-swarm-dod-json.sh [--agents codex,claude,gemini]
+
+Options:
+  --agents  Comma-separated agent list. Default: codex,claude,gemini (or AGENTS env)
+  -h,--help Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agents)
+      [[ $# -ge 2 ]] || { echo "ERROR: --agents requires a value" >&2; exit 1; }
+      AGENTS_RAW="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+IFS=',' read -r -a AGENTS_INPUT <<< "$AGENTS_RAW"
+declare -a AGENTS_LIST=()
+for item in "${AGENTS_INPUT[@]}"; do
+  agent="${item//[[:space:]]/}"
+  [[ -z "$agent" ]] && continue
+  case "$agent" in
+    codex|claude|gemini) AGENTS_LIST+=("$agent") ;;
+    *) echo "ERROR: unsupported agent in AGENTS: $agent (allowed: codex,claude,gemini)" >&2; exit 1 ;;
+  esac
+done
+if [[ "${#AGENTS_LIST[@]}" -eq 0 ]]; then
+  echo "ERROR: no valid agents selected. Set AGENTS like: codex,gemini" >&2
   exit 1
 fi
+for agent in "${AGENTS_LIST[@]}"; do
+  command -v "$agent" >/dev/null 2>&1 || { echo "ERROR: $agent is required (selected via AGENTS)" >&2; exit 1; }
+done
 
 run_swarm() {
   "${BUN_X[@]}" "$SWARM_TS" "$@"
 }
-
-PREFIX="regdod-$(date +%Y%m%d-%H%M%S)-$RANDOM"
-TMP_REPO="$(mktemp -d "/tmp/swarm-regdod-XXXXXX")"
-
-cleanup() {
-  rm -rf "$TMP_REPO"
-}
-trap cleanup EXIT
-
-echo "[INFO] temp repo: $TMP_REPO"
-echo "[INFO] agent: $AGENT"
-
-git -C "$TMP_REPO" init -q
-git -C "$TMP_REPO" config user.name "swarm-regdod"
-git -C "$TMP_REPO" config user.email "swarm-regdod@example.com"
-cat > "$TMP_REPO/README.md" <<'EOT'
-# swarm dod json regression temp repo
-EOT
-git -C "$TMP_REPO" add README.md
-git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 status_of() {
   local json="$1"
@@ -122,65 +141,97 @@ assert_eq() {
   local msg="$3"
   if [[ "$expected" != "$actual" ]]; then
     echo "[ERROR] assert failed: $msg (expected=$expected actual=$actual)"
-    exit 1
+    return 1
   fi
+  return 0
 }
 
-# Case 1: ci_commands from CLI should execute and pass.
-TASK1="${PREFIX}-batch-ci-pass"
-run_swarm spawn \
-  --repo "$TMP_REPO" \
-  --agent "$AGENT" \
-  --mode batch \
-  --name "$TASK1" \
-  --ci-commands "git status --porcelain" \
-  --task "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >/dev/null
-wait_status "$TASK1" "success" 240
-assert_eq "pass" "$(dod_field_of "$TASK1" "dod.status")" "case1 dod pass"
+run_agent_cases() {
+  local agent="$1"
+  local prefix="$2"
+  local repo="$3"
 
-# Case 2: pending should run DoD checks but must not execute push/pr commands.
-TASK2="${PREFIX}-interactive-pending-no-push-pr"
-run_swarm spawn \
-  --repo "$TMP_REPO" \
-  --agent "$AGENT" \
-  --mode interactive \
-  --name "$TASK2" \
-  --dod-json '{"allowed_statuses":["pending","success"],"ci_commands":["git status --porcelain"],"push_command":"touch .dod_push_done","pr_command":"touch .dod_pr_done"}' \
-  --task "交互只读：列出仓库根目录文件并给一句总结；完成后保持会话等待，不要退出。" >/dev/null
-wait_status "$TASK2" "pending" 240
-assert_eq "pass" "$(dod_field_of "$TASK2" "dod.status")" "case2 dod pass in pending"
-assert_eq "false" "$(dod_field_of "$TASK2" "dod.result.actions.push.executed")" "case2 pending no push"
-assert_eq "false" "$(dod_field_of "$TASK2" "dod.result.actions.pr.executed")" "case2 pending no pr"
+  local task1 task2 task3 task4
+  task1="${prefix}-batch-ci-pass"
+  task2="${prefix}-interactive-pending-no-push-pr"
+  task3="${prefix}-batch-ahead-pass"
+  task4="${prefix}-batch-ahead-fail"
 
-# On cancel, status becomes success and push/pr should execute.
-run_swarm cancel --id "$TASK2" --reason "regression_dod_pending_to_success" >/dev/null
-wait_status "$TASK2" "success" 120
-assert_eq "true" "$(dod_field_of "$TASK2" "dod.result.actions.push.executed")" "case2 success push executed"
-assert_eq "true" "$(dod_field_of "$TASK2" "dod.result.actions.pr.executed")" "case2 success pr executed"
+  run_swarm spawn \
+    --repo "$repo" \
+    --agent "$agent" \
+    --mode batch \
+    --name "$task1" \
+    --ci-commands "git status --porcelain" \
+    --task "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >/dev/null
+  wait_status "$task1" "success" 240
+  assert_eq "pass" "$(dod_field_of "$task1" "dod.status")" "${agent} case1 dod pass"
 
-# Case 3: require_commits_ahead_base should pass for write task with commit.
-TASK3="${PREFIX}-batch-ahead-pass"
-run_swarm spawn \
-  --repo "$TMP_REPO" \
-  --agent "$AGENT" \
-  --mode batch \
-  --name "$TASK3" \
-  --dod-json '{"require_commits_ahead_base":true}' \
-  --task '批处理写任务：在仓库根目录创建 REG_DOD_AHEAD_PASS.md，写一行文本并提交 commit，提交信息为 "test: dod ahead pass"，完成后退出。' >/dev/null
-wait_status "$TASK3" "success" 240
-assert_eq "pass" "$(dod_field_of "$TASK3" "dod.status")" "case3 dod pass with ahead commits"
+  run_swarm spawn \
+    --repo "$repo" \
+    --agent "$agent" \
+    --mode interactive \
+    --name "$task2" \
+    --dod-json '{"allowed_statuses":["pending","success"],"ci_commands":["git status --porcelain"],"push_command":"touch .dod_push_done","pr_command":"touch .dod_pr_done"}' \
+    --task "交互只读：列出仓库根目录文件并给一句总结；完成后保持会话等待，不要退出。" >/dev/null
+  wait_status "$task2" "pending" 240
+  assert_eq "pass" "$(dod_field_of "$task2" "dod.status")" "${agent} case2 dod pass in pending"
+  assert_eq "false" "$(dod_field_of "$task2" "dod.result.actions.push.executed")" "${agent} case2 pending no push"
+  assert_eq "false" "$(dod_field_of "$task2" "dod.result.actions.pr.executed")" "${agent} case2 pending no pr"
 
-# Case 4: require_commits_ahead_base should fail for read-only task.
-TASK4="${PREFIX}-batch-ahead-fail"
-run_swarm spawn \
-  --repo "$TMP_REPO" \
-  --agent "$AGENT" \
-  --mode batch \
-  --name "$TASK4" \
-  --dod-json '{"require_commits_ahead_base":true}' \
-  --task "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >/dev/null
-wait_status "$TASK4" "success" 240
-assert_eq "fail" "$(dod_field_of "$TASK4" "dod.status")" "case4 dod fail without ahead commits"
-assert_eq "no_commits_ahead_base" "$(dod_field_of "$TASK4" "dod.result.reason")" "case4 fail reason"
+  run_swarm cancel --id "$task2" --reason "regression_dod_pending_to_success" >/dev/null
+  wait_status "$task2" "success" 120
+  assert_eq "true" "$(dod_field_of "$task2" "dod.result.actions.push.executed")" "${agent} case2 success push executed"
+  assert_eq "true" "$(dod_field_of "$task2" "dod.result.actions.pr.executed")" "${agent} case2 success pr executed"
+
+  run_swarm spawn \
+    --repo "$repo" \
+    --agent "$agent" \
+    --mode batch \
+    --name "$task3" \
+    --dod-json '{"require_commits_ahead_base":true}' \
+    --task '批处理写任务：在仓库根目录创建 REG_DOD_AHEAD_PASS.md，写一行文本并提交 commit，提交信息为 "test: dod ahead pass"，完成后退出。' >/dev/null
+  wait_status "$task3" "success" 240
+  assert_eq "pass" "$(dod_field_of "$task3" "dod.status")" "${agent} case3 dod pass with ahead commits"
+
+  run_swarm spawn \
+    --repo "$repo" \
+    --agent "$agent" \
+    --mode batch \
+    --name "$task4" \
+    --dod-json '{"require_commits_ahead_base":true}' \
+    --task "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >/dev/null
+  wait_status "$task4" "success" 240
+  assert_eq "fail" "$(dod_field_of "$task4" "dod.status")" "${agent} case4 dod fail without ahead commits"
+  assert_eq "no_commits_ahead_base" "$(dod_field_of "$task4" "dod.result.reason")" "${agent} case4 fail reason"
+}
+
+echo "[INFO] agents: ${AGENTS_LIST[*]}"
+
+for agent in "${AGENTS_LIST[@]}"; do
+  PREFIX="regdod-${agent}-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+  TMP_REPO="$(mktemp -d "/tmp/swarm-regdod-${agent}-XXXXXX")"
+  cleanup_repo() {
+    rm -rf "$TMP_REPO"
+  }
+  trap cleanup_repo EXIT
+
+  echo "[INFO] temp repo: $TMP_REPO"
+  echo "[INFO] agent: $agent"
+
+  git -C "$TMP_REPO" init -q
+  git -C "$TMP_REPO" config user.name "swarm-regdod"
+  git -C "$TMP_REPO" config user.email "swarm-regdod@example.com"
+  cat > "$TMP_REPO/README.md" <<'EOT'
+# swarm dod json regression temp repo
+EOT
+  git -C "$TMP_REPO" add README.md
+  git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
+
+  run_agent_cases "$agent" "$PREFIX" "$TMP_REPO"
+
+  rm -rf "$TMP_REPO"
+  trap - EXIT
+done
 
 echo "[PASS] DoD JSON regression cases passed"

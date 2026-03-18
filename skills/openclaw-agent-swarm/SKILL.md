@@ -286,17 +286,6 @@ Or directly:
 
 Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
 
-### update-dod - Manually Update DoD Status
-
-```bash
-"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" update-dod \
-  --id <task-id> \
-  --status pass|fail \
-  --result '{"summary":"Custom DoD check passed","error":""}'
-```
-
-Use this when you have custom DoD criteria beyond the defaults (e.g., "must have pushed to remote", "must have new commits").
-
 ### publish - Push Branch to Remote
 
 ```bash
