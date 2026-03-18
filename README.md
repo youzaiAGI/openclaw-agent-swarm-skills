@@ -71,49 +71,49 @@ claude --version  # or codex --version, or gemini --version
 
 ---
 
-## 📖 Quick Start
+## 📖 Quick Start (Agent Prompts)
+
+The following examples are **prompts** you can send to your AI Agent (Claude, Codex, Gemini, etc.) once the skill is installed. The Agent will translate these into the appropriate CLI commands.
 
 ### 1. Spawn a Task
-
-Tell Claude to start a background task in a git repository:
+Tell your Agent to start a background task:
 
 **Batch mode** (fire-and-forget):
-```
+```text
 In ~/projects/my-app, spawn a batch task to add error handling to the API endpoints.
 Run 'npm test' to verify it works.
 ```
 
 **Interactive mode** (you can send follow-up messages):
-```
+```text
 Start an interactive task in ~/projects/backend to investigate the memory leak.
 Use codex and let me attach messages later.
 ```
 
 ### 2. Check Status
-
 Monitor your tasks:
-```
+```text
 Check all agent swarm tasks and show me what changed.
 ```
 
 Or check a specific task:
-```
+```text
 What's the status of task abc123?
 ```
 
 ### 3. Review and Publish
-
 When a task completes successfully:
-```
+```text
 Publish task abc123 and create a PR automatically.
 ```
 
-### 4. Handle Failures
+---
 
-If a task fails, spawn a follow-up:
-```
-Task xyz789 failed. Start a follow-up in the same worktree to fix the linter errors.
-```
+## 💻 Technical CLI Reference
+
+If you need to run the underlying commands manually or integrate them into scripts, please refer to:
+
+👉 **[CLI Manual](docs/cli-reference.md)** - Full reference for `swarm.ts` arguments, environment variables, and exit codes.
 
 ---
 
@@ -129,6 +129,9 @@ Tasks aren't considered complete until DoD validation passes. The swarm automati
 
 **Custom DoD spec**: Use `skills/openclaw-agent-swarm/references/dod.json` as template and pass with `--dod-json` or `--dod-json-file`.
 DoD JSON must use grouped fields under `checks` and `actions` (legacy flat keys are not supported).
+Default `dod_spec.actions.push_command` is `git push -u origin HEAD`.
+If you do not want auto-push, set `dod_spec.actions.push_command` to an empty string.
+If you use GitHub CLI, a common `dod_spec.actions.pr_command` is `gh pr create --fill --base main --head "$(git rev-parse --abbrev-ref HEAD)"`.
 
 Only tasks with `dod.status=pass` can be published.
 

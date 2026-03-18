@@ -130,6 +130,10 @@ DoD is evaluated automatically when task status transitions to `pending` or `suc
 4. All `dod_spec.checks.ci_commands` pass (if specified)
 5. On `success` only: execute `dod_spec.actions.push_command` and `dod_spec.actions.pr_command` (if non-empty)
 
+Notes:
+- If you do not want auto-push, set `dod_spec.actions.push_command` to an empty string.
+- For GitHub CLI, a common PR command is `gh pr create --fill --base main --head "$(git rev-parse --abbrev-ref HEAD)"`.
+
 **DoD status:**
 - `pass`: Task completed successfully and met all criteria
 - `fail`: Task didn't meet DoD criteria
@@ -192,7 +196,8 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
   --repo ~/projects/myapp \
   --task "Fix the memory leak in the cache module" \
   --mode batch \
-  --ci-commands "npm run lint,npm test -- --run"
+  --ci-commands "npm run lint,npm test -- --run" \
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 ```
 
 ### spawn-followup - Continue Failed/Stopped Task
@@ -223,7 +228,8 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from 20260316-143022-a1b2c3 \
   --task "The previous attempt failed because of missing imports. Fix the imports and try again." \
-  --session-mode new
+  --session-mode new \
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 ```
 
 ### attach - Send Message to Interactive Task
@@ -413,7 +419,8 @@ cat ~/.agents/agent-swarm/logs/<task-id>.log | tail -100
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <failed-task-id> \
   --task "The test failed because of missing mock data. Add the mock data and rerun tests." \
-  --session-mode new
+  --session-mode new \
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 ```
 
 ## How It Works
@@ -461,7 +468,7 @@ Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
       "ci_commands": ["npm test -- --run"]
     },
     "actions": {
-      "push_command": "",
+      "push_command": "git push -u origin HEAD",
       "pr_command": ""
     }
   },
@@ -492,7 +499,7 @@ DoD is automatically evaluated when status changes to `pending` or `success`.
   --task "Implement user profile page" \
   --mode batch \
   --ci-commands "npm run lint,npm test -- --run,npm run type-check" \
-  --dod-json '{"checks":{"require_commits_ahead_base":true}}'
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 ```
 
 Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout.
@@ -504,13 +511,15 @@ Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add user authentication" \
-  --mode interactive
+  --mode interactive \
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 
 # After it stops, continue in same worktree with conversation history
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <task-id> \
   --task "Now add password reset functionality" \
-  --session-mode reuse
+  --session-mode reuse \
+  --dod-json-file "$SKILL_DIR/references/dod.json"
 ```
 
 **Session mode comparison:**

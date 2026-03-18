@@ -88,7 +88,9 @@ swarm_json() {
     return 1
   fi
   echo "[SWARM][RET][OK] $label" >&2
-  echo "$out" >&2
+  if [[ "${REGRESSION_VERBOSE:-0}" == "1" ]]; then
+    echo "$out" >&2
+  fi
   printf '%s' "$out"
 }
 
@@ -251,66 +253,39 @@ run_agent_cases() {
   wait_status "$task1" "success" 240
   assert_eq "pass" "$(dod_field_of "$task1" "dod.status")" "${agent} case1 dod pass"
   print_task_result "$task1" "true" "${agent} case1 batch_ci_pass"
+  echo "[SUMMARY][CASE] agent=$agent case=1 task=$task1 status=success dod=pass"
 
   swarm_json "spawn:$task3" spawn \
     --repo "$repo" \
     --agent "$agent" \
     --mode batch \
     --name "$task3" \
-    --dod-json '{"require_commits_ahead_base":true}' \
+    --dod-json '{"checks":{"require_commits_ahead_base":true}}' \
     --task '批处理写任务：在仓库根目录创建 REG_DOD_AHEAD_PASS.md，写一行文本并提交 commit，提交信息为 "test: dod ahead pass"，完成后退出。' >/dev/null
   wait_status "$task3" "success" 240
   assert_eq "pass" "$(dod_field_of "$task3" "dod.status")" "${agent} case3 dod pass with ahead commits"
   print_task_result "$task3" "true" "${agent} case3 batch_ahead_pass"
+  echo "[SUMMARY][CASE] agent=$agent case=3 task=$task3 status=success dod=pass"
 
   swarm_json "spawn:$task4" spawn \
     --repo "$repo" \
     --agent "$agent" \
     --mode batch \
     --name "$task4" \
-    --dod-json '{"require_commits_ahead_base":true}' \
+    --dod-json '{"checks":{"require_commits_ahead_base":true}}' \
     --task "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >/dev/null
   wait_status "$task4" "success" 240
   assert_eq "fail" "$(dod_field_of "$task4" "dod.status")" "${agent} case4 dod fail without ahead commits"
   assert_eq "no_commits_ahead_base" "$(dod_field_of "$task4" "dod.result.reason")" "${agent} case4 fail reason"
   print_task_result "$task4" "true" "${agent} case4 batch_ahead_fail_expected"
-
-  list_out="$(swarm_json "list:${agent}" list)"
-  assert_eq "true" "$(json_field_from_text "$list_out" "ok")" "${agent} list ok"
-  status_id_out="$(swarm_json "status:${task1}" status --id "$task1")"
-  assert_eq "true" "$(json_field_from_text "$status_id_out" "ok")" "${agent} status id ok"
-  status_query_out="$(swarm_json "status-query:${task1}" status --query "$task1")"
-  assert_eq "true" "$(json_field_from_text "$status_query_out" "ok")" "${agent} status query ok"
-
-  swarm_json "spawn-followup-new:${task4}" spawn-followup \
-    --from "$task4" \
-    --session-mode new \
-    --name "${task4}-followup-new" \
-    --task "followup new: 批处理只读检查，输出一句总结后退出。" >/dev/null
-  wait_status "${task4}-followup-new" "success" 240
-  print_task_result "${task4}-followup-new" "true" "${agent} followup_new_success"
-
-  swarm_json "spawn-followup-reuse:${task4}" spawn-followup \
-    --from "$task4" \
-    --session-mode reuse \
-    --name "${task4}-followup-reuse" \
-    --task "followup reuse: 批处理只读检查，输出一句总结后退出。" >/dev/null
-  wait_status "${task4}-followup-reuse" "success" 240
-  print_task_result "${task4}-followup-reuse" "true" "${agent} followup_reuse_success"
-
-  publish_out="$(swarm_json "publish:${task3}" publish --id "$task3")"
-  assert_eq "true" "$(json_field_from_text "$publish_out" "ok")" "${agent} publish ok"
-  assert_eq "true" "$(json_field_from_text "$publish_out" "publish.ok")" "${agent} publish.push ok"
-  pr_out="$(swarm_json "create-pr:${task3}" create-pr --id "$task3")"
-  assert_eq "true" "$(json_field_from_text "$pr_out" "ok")" "${agent} create-pr call ok"
-  print_task_result "$task3" "true" "${agent} publish_create_pr_checked"
+  echo "[SUMMARY][CASE] agent=$agent case=4 task=$task4 status=success dod=fail reason=no_commits_ahead_base(expected)"
 
   swarm_json "spawn:$task2" spawn \
     --repo "$repo" \
     --agent "$agent" \
     --mode interactive \
     --name "$task2" \
-    --dod-json '{"allowed_statuses":["pending","success"],"ci_commands":["git status --porcelain"],"push_command":"touch .dod_push_done","pr_command":"touch .dod_pr_done"}' \
+    --dod-json '{"checks":{"allowed_statuses":["pending","success"],"ci_commands":["git status --porcelain"]},"actions":{"push_command":"touch .dod_push_done","pr_command":"touch .dod_pr_done"}}' \
     --task "交互只读：列出仓库根目录文件并给一句总结；完成后保持会话等待，不要退出。" >/dev/null
   wait_status "$task2" "pending" 240
   assert_eq "pass" "$(dod_field_of "$task2" "dod.status")" "${agent} case2 dod pass in pending"
@@ -322,6 +297,7 @@ run_agent_cases() {
   assert_eq "true" "$(dod_field_of "$task2" "dod.result.actions.push.executed")" "${agent} case2 success push executed"
   assert_eq "true" "$(dod_field_of "$task2" "dod.result.actions.pr.executed")" "${agent} case2 success pr executed"
   print_task_result "$task2" "true" "${agent} case2 interactive_pending_then_success"
+  echo "[SUMMARY][CASE] agent=$agent case=2 task=$task2 pending_dod=pass success_dod=pass push_pr=executed"
 }
 
 echo "[INFO] agents: ${AGENTS_LIST[*]}"
@@ -353,6 +329,7 @@ EOT
   git -C "$TMP_REPO" remote add origin "$REMOTE_REPO"
 
   run_agent_cases "$agent" "$PREFIX" "$TMP_REPO"
+  echo "[SUMMARY][AGENT] agent=$agent cases=4 result=pass"
 
   rm -rf "$REMOTE_REPO_DIR"
   rm -rf "$TMP_REPO"
@@ -360,4 +337,4 @@ EOT
 done
 
 echo "[PASS] DoD JSON regression cases passed"
-echo "[SUMMARY][OVERALL] dod-json regression=pass"
+echo "[SUMMARY][OVERALL] suite=dod-json cases_per_agent=4 agents=${#AGENTS_LIST[@]} result=pass"

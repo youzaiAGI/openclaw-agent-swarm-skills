@@ -71,49 +71,49 @@ claude --version  # 或 codex --version, 或 gemini --version
 
 ---
 
-## 📖 快速上手
+## 📖 快速上手 (Agent 指令)
+
+以下示例是你在安装该 Skill 后，可以直接发送给 AI Agent（Claude, Codex, Gemini 等）的 **Prompt 指令**。Agent 会自动将这些指令转化为相应的 CLI 命令去执行。
 
 ### 1. 启动任务
-
-告诉 Claude 在 Git 仓库中启动一个后台任务：
+告诉你的 Agent 启动一个后台任务：
 
 **批处理模式**（运行后即不管）：
-```
+```text
 在 ~/projects/my-app 中启动一个批处理任务，为 API 端点添加错误处理。
 运行 'npm test' 验证是否正常工作。
 ```
 
 **交互模式**（你可以发送后续消息）：
-```
+```text
 在 ~/projects/backend 中启动一个交互式任务来排查内存泄漏。
 使用 codex，并允许我稍后发送消息。
 ```
 
 ### 2. 检查状态
-
 监控你的任务：
-```
+```text
 检查所有 agent swarm 任务并显示变更。
 ```
 
 或者检查特定任务：
-```
+```text
 任务 abc123 的状态是什么？
 ```
 
 ### 3. 复核与发布
-
 当任务成功完成时：
-```
+```text
 发布任务 abc123 并自动创建 PR。
 ```
 
-### 4. 处理失败
+---
 
-如果任务失败，启动一个后续任务：
-```
-任务 xyz789 失败了。在同一个 worktree 中启动一个后续任务来修复 linter 错误。
-```
+## 💻 技术命令行参考 (CLI)
+
+如果你需要手动运行底层命令，或者将其集成到脚本中，请参考：
+
+👉 **[CLI 命令行手册](cli-reference.md)** - 包含 `swarm.ts` 的参数说明、环境变量以及状态码定义。
 
 ---
 
@@ -121,13 +121,17 @@ claude --version  # 或 codex --version, 或 gemini --version
 
 任务只有在通过 DoD 验证后才被视为完成。Swarm 会自动检查：
 
-1. **状态允许** - `task.status` 必须命中 `dod_spec.allowed_statuses`（默认 `pending/success`）。
-2. **Worktree 干净** - 默认要求无未提交变更。
-3. **CI 命令通过** - `dod_spec.ci_commands` 中所有命令必须返回 0。
-4. **可选 ahead 校验** - 可要求相对 base 分支存在新增 commit。
-5. **success 阶段动作** - 可执行 `push_command` / `pr_command`（为空则跳过）。
+1. **状态允许** - 默认允许 `pending` 和 `success`
+2. **Worktree 干净** - 无未提交变更（默认开启）
+3. **CI 命令通过** - `dod_spec.checks.ci_commands` 中所有命令必须以状态码 0 退出
+4. **可选 ahead 校验** - 要求相对 base 分支存在新增 commit
+5. **仅限 success 阶段动作** - 如果配置了 `dod_spec.actions.push_command` / `dod_spec.actions.pr_command` 则执行
 
 **DoD 规格模板**：参考 `skills/openclaw-agent-swarm/references/dod.json`，通过 `--dod-json` 或 `--dod-json-file` 传入。
+DoD JSON 必须使用 `checks` 和 `actions` 下的分组字段（不再支持旧版的扁平键名）。
+默认的 `dod_spec.actions.push_command` 是 `git push -u origin HEAD`。
+如果你不希望自动推送，请将 `dod_spec.actions.push_command` 设置为空字符串。
+如果你使用 GitHub CLI，一个常用的 `dod_spec.actions.pr_command` 是 `gh pr create --fill --base main --head "$(git rev-parse --abbrev-ref HEAD)"`。
 
 只有 `dod.status=pass` 的任务才可以被发布。
 

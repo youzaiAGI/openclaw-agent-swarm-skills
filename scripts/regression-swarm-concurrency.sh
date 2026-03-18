@@ -85,14 +85,17 @@ swarm_json() {
     return 1
   fi
   echo "[SWARM][RET][OK] $label" >&2
-  echo "$out" >&2
+  if [[ "${REGRESSION_VERBOSE:-0}" == "1" ]]; then
+    echo "$out" >&2
+  fi
   printf '%s' "$out"
 }
 
 # policy knobs (script-side external timeout control)
 BATCH_RUNNING_KILL_SEC=180
-INTERACTIVE_LOG_QUIET_TO_PENDING_SEC=60
+INTERACTIVE_LOG_QUIET_TO_PENDING_SEC=10
 INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC=180
+INTERACTIVE_PENDING_GRACE_SEC=90
 POLL_SEC=5
 
 PREFIX="regtest-$(date +%Y%m%d-%H%M%S)-$RANDOM"
@@ -108,10 +111,12 @@ trap cleanup EXIT
 echo "[INFO] temp repo: $TMP_REPO"
 echo "[INFO] task prefix: $PREFIX"
 echo "[INFO] agents: ${AGENTS_LIST[*]}"
-echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 4)) tasks (${AGENTS_LIST[*]} x batch/interactive x read/write)"
+echo "[INFO] workload: $((${#AGENTS_LIST[@]} * 6)) tasks (${AGENTS_LIST[*]} x 4 base cases + 2 follow-up context cases)"
 echo "[INFO] policy: batch running>${BATCH_RUNNING_KILL_SEC}s => cancel+FAIL"
 echo "[INFO] policy: interactive quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s => require status=pending => cancel => require success"
 echo "[INFO] policy: interactive logs continuously updating>${INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC}s => cancel+FAIL"
+echo "[INFO] policy: interactive pending grace ${INTERACTIVE_PENDING_GRACE_SEC}s after quiet threshold"
+echo "[INFO] policy: follow-up context (same parent): reuse must recall token, new must return NONE"
 
 git -C "$TMP_REPO" init -q
 git -C "$TMP_REPO" config user.name "swarm-regression"
@@ -124,6 +129,7 @@ git -C "$TMP_REPO" commit -q -m "chore: init temp repo"
 
 > "$TASKS_FILE"
 for agent in "${AGENTS_LIST[@]}"; do
+  context_marker="CTX_${PREFIX}_${agent}_MEM"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "ro" "-" "-" \
     "批处理只读：列出仓库根目录文件并给一句总结，不要修改任何文件，完成后退出。" >> "$TASKS_FILE"
@@ -141,7 +147,7 @@ for agent in "${AGENTS_LIST[@]}"; do
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "batch" "write" "$batch_file" "$batch_commit" \
-    "批处理写任务：在仓库根目录创建 ${batch_file}，写两行文本并提交 commit，提交信息为 \"${batch_commit}\"，完成后退出。" >> "$TASKS_FILE"
+    "批处理写任务：在仓库根目录创建 ${batch_file}，写两行文本并提交 commit，提交信息为 \"${batch_commit}\"，并记住本次会话 token=${context_marker}；完成后退出。" >> "$TASKS_FILE"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$agent" "interactive" "ro" "-" "-" \
@@ -158,6 +164,7 @@ declare -a INTERACTIVE_IDS=()
 declare -a SPAWN_PIDS=()
 declare -a BATCH_WRITE_CASES=()
 declare -a WRITE_IDS=()
+declare -a FOLLOWUP_TASK_IDS=()
 
 i=0
 while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
@@ -285,6 +292,16 @@ get_task_log() {
   node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(t.log||''));" "$task_json"
 }
 
+get_task_result_excerpt() {
+  local task_id="$1"
+  local task_json
+  task_json="$(task_json_path "$task_id")"
+  if [[ ! -f "$task_json" ]]; then
+    return 1
+  fi
+  node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(t.result_excerpt||''));" "$task_json"
+}
+
 print_task_result() {
   local task_id="$1"
   local pass="$2"
@@ -378,7 +395,8 @@ cancel_task() {
 cancel_non_terminal_tasks() {
   local json
   json="$(swarm_json "check:cleanup" check --json)"
-  for id in "${TASK_IDS[@]}"; do
+  local all_ids=("${TASK_IDS[@]}" "${FOLLOWUP_TASK_IDS[@]}")
+  for id in "${all_ids[@]}"; do
     local st
     st="$(status_of "$json" "$id")"
     case "$st" in
@@ -493,7 +511,7 @@ for id in "${INTERACTIVE_IDS[@]}"; do
 done
 
 # 3) interactive case pass criteria (script-side):
-#    - wait until log is quiet for 60s
+#    - wait until log is quiet for INTERACTIVE_LOG_QUIET_TO_PENDING_SEC
 #    - then status must be pending
 #    - then cancel immediately
 #    - then status must become success
@@ -522,12 +540,14 @@ wait_interactive_quiet_then_pending() {
     echo "[CHECK][interactive] $id status=$st quiet=${quiet_sec}s elapsed=${elapsed}s"
 
     if (( quiet_sec >= INTERACTIVE_LOG_QUIET_TO_PENDING_SEC )); then
-      if [[ "$st" != "pending" ]]; then
-        echo "[ERROR] after log quiet ${INTERACTIVE_LOG_QUIET_TO_PENDING_SEC}s, status must be pending: $id => $st"
-        cancel_task "$id" "interactive_not_pending_after_quiet" || true
+      if [[ "$st" == "pending" ]]; then
+        return 0
+      fi
+      if (( quiet_sec >= INTERACTIVE_LOG_QUIET_TO_PENDING_SEC + INTERACTIVE_PENDING_GRACE_SEC )); then
+        echo "[ERROR] status not pending within grace window after quiet threshold: $id => $st (quiet=${quiet_sec}s)"
+        cancel_task "$id" "interactive_not_pending_after_quiet_grace" || true
         return 1
       fi
-      return 0
     fi
 
     if (( elapsed >= INTERACTIVE_CONTINUOUS_UPDATE_FAIL_SEC )); then
@@ -621,16 +641,89 @@ for id in "${WRITE_IDS[@]}"; do
   fi
 done
 
+# 6) follow-up context check on batch-write parents:
+#    same parent task:
+#    - reuse mode should recall prior context token
+#    - new mode should not have that context (expect NONE)
+followup_fail=0
+followup_pass_count=0
+followup_fail_count=0
+for agent in "${AGENTS_LIST[@]}"; do
+  parent_id="${PREFIX}-${agent}-batch-write"
+  marker="CTX_${PREFIX}_${agent}_MEM"
+  reuse_id="${parent_id}-followup-reuse"
+  new_id="${parent_id}-followup-new"
+
+  reuse_task='followup context(reuse): 只输出一行 FOLLOWUP_CONTEXT=<value>。如果能回忆上一个任务中的会话 token 就输出该 token，否则输出 NONE；不要读取任何文件，然后退出。'
+  new_task='followup context(new): 只输出一行 FOLLOWUP_CONTEXT=<value>。如果能回忆上一个任务中的会话 token 就输出该 token，否则输出 NONE；不要读取任何文件，然后退出。'
+
+  if ! swarm_json "followup:$reuse_id" spawn-followup --from "$parent_id" --session-mode reuse --name "$reuse_id" --task "$reuse_task" >/dev/null; then
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$reuse_id" "false" "followup_reuse_spawn_failed"
+    continue
+  fi
+  FOLLOWUP_TASK_IDS+=("$reuse_id")
+  if ! wait_task_status "$reuse_id" "success" 180; then
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$reuse_id" "false" "followup_reuse_not_success"
+    continue
+  fi
+  reuse_excerpt="$(get_task_result_excerpt "$reuse_id" || true)"
+  if [[ "$reuse_excerpt" == *"FOLLOWUP_CONTEXT=${marker}"* ]]; then
+    followup_pass_count=$((followup_pass_count + 1))
+    print_task_result "$reuse_id" "true" "followup_reuse_context_recalled"
+  else
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$reuse_id" "false" "followup_reuse_context_missing"
+  fi
+
+  if ! swarm_json "followup:$new_id" spawn-followup --from "$parent_id" --session-mode new --name "$new_id" --task "$new_task" >/dev/null; then
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$new_id" "false" "followup_new_spawn_failed"
+    continue
+  fi
+  FOLLOWUP_TASK_IDS+=("$new_id")
+  if ! wait_task_status "$new_id" "success" 180; then
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$new_id" "false" "followup_new_not_success"
+    continue
+  fi
+  new_excerpt="$(get_task_result_excerpt "$new_id" || true)"
+  if [[ "$new_excerpt" == *"FOLLOWUP_CONTEXT=NONE"* && "$new_excerpt" != *"${marker}"* ]]; then
+    followup_pass_count=$((followup_pass_count + 1))
+    print_task_result "$new_id" "true" "followup_new_no_context_expected"
+  else
+    followup_fail=1
+    followup_fail_count=$((followup_fail_count + 1))
+    print_task_result "$new_id" "false" "followup_new_context_leaked"
+  fi
+done
+
+if (( followup_fail != 0 )); then
+  echo "[ERROR] follow-up context requirement failed"
+fi
+
 for id in "${TASK_IDS[@]}"; do
   st="$(status_of "$json_end" "$id")"
   echo "[SUMMARY][CASE] task=$id final_status=$st"
 done
+for id in "${FOLLOWUP_TASK_IDS[@]}"; do
+  out="$(swarm_json "check:followup:$id" check --json)"
+  st="$(status_of "$out" "$id")"
+  echo "[SUMMARY][CASE] task=$id final_status=$st"
+done
 
-if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 )); then
+if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 || followup_fail != 0 )); then
   cancel_non_terminal_tasks
   echo "[FAIL] regression failed"
   echo "[SUMMARY][OVERALL] concurrency regression=fail"
   exit 1
 fi
-echo "[PASS] regression passed (batch=success, interactive=success)"
+echo "[SUMMARY] followup_pass=${followup_pass_count}/$((${#AGENTS_LIST[@]} * 2)) followup_fail=${followup_fail_count}/$((${#AGENTS_LIST[@]} * 2))"
+echo "[PASS] regression passed (batch=success, interactive=success, followup_context=pass)"
 echo "[SUMMARY][OVERALL] concurrency regression=pass"

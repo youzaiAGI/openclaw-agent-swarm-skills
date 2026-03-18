@@ -41,7 +41,7 @@ DoD is stored under `task.dod`:
       "ci_commands": ["npm test -- --run smoke"]
     },
     "actions": {
-      "push_command": "",
+      "push_command": "git push -u origin HEAD",
       "pr_command": ""
     }
   },

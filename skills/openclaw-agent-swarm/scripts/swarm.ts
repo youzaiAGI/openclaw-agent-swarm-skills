@@ -686,7 +686,7 @@ function defaultDodSpec(): AnyObj {
       ci_commands: [],
     },
     actions: {
-      push_command: '',
+      push_command: 'git push -u origin HEAD',
       pr_command: '',
     },
   };
