@@ -132,6 +132,7 @@ DoD is evaluated automatically when task status transitions to `pending` or `suc
 
 Notes:
 - If you do not want auto-push, set `dod_spec.actions.push_command` to an empty string.
+- If `dod_spec.actions.push_command` and/or `dod_spec.actions.pr_command` is empty, only remind/suggest manual `publish`/`create-pr`; do not auto-run those commands.
 - For GitHub CLI, a common PR command is `gh pr create --fill --base main --head "$(git rev-parse --abbrev-ref HEAD)"`.
 
 **DoD status:**

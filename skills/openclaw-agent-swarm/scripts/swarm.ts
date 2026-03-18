@@ -824,6 +824,69 @@ function clearDod(task: AnyObj): void {
   task.dod = {};
 }
 
+function extractFirstUrl(text: string): string {
+  const m = String(text || '').match(/https?:\/\/[^\s)>\]'"`]+/);
+  return m ? m[0] : '';
+}
+
+function inferPrCliFromCommand(cmd: string): string {
+  const c = String(cmd || '').trim();
+  if (!c) return '';
+  if (c.startsWith('gh ') || c === 'gh') return 'gh';
+  if (c.startsWith('glab ') || c === 'glab') return 'glab';
+  return '';
+}
+
+function syncPublishPrFromDod(task: AnyObj): void {
+  const dod = task?.dod && typeof task.dod === 'object' ? task.dod : {};
+  if (!dodPassed(dod)) return;
+  const result = dod.result && typeof dod.result === 'object' ? dod.result : {};
+  const actions = result.actions && typeof result.actions === 'object' ? result.actions : {};
+  const push = actions.push && typeof actions.push === 'object' ? actions.push : {};
+  const pr = actions.pr && typeof actions.pr === 'object' ? actions.pr : {};
+  const sourceBranch = String(task.branch || '');
+  const targetBranch = String(task.base_branch || '');
+  const syncedAt = nowIso();
+
+  const pushCmd = String(push.command || '').trim();
+  const pushExecuted = Boolean(push.executed);
+  const pushExitCode = Number.parseInt(String(push.exit_code ?? ''), 10);
+  if (pushCmd && pushExecuted && pushExitCode === 0) {
+    const prev = task.publish && typeof task.publish === 'object' ? task.publish : {};
+    task.publish = {
+      ok: true,
+      remote: String(prev.remote || 'origin'),
+      remote_branch: String(prev.remote_branch || sourceBranch),
+      target_branch: String(prev.target_branch || targetBranch),
+      published_at: String(prev.published_at || syncedAt),
+      error: '',
+      forge: String(prev.forge || 'unknown'),
+      remote_url: String(prev.remote_url || ''),
+      via: 'dod_action',
+      command: pushCmd,
+    };
+  }
+
+  const prCmd = String(pr.command || '').trim();
+  const prExecuted = Boolean(pr.executed);
+  const prExitCode = Number.parseInt(String(pr.exit_code ?? ''), 10);
+  if (prCmd && prExecuted && prExitCode === 0) {
+    const prev = task.pr && typeof task.pr === 'object' ? task.pr : {};
+    task.pr = {
+      ok: true,
+      state: 'opened',
+      url: extractFirstUrl(String(pr.output || '')) || String(prev.url || ''),
+      cli: inferPrCliFromCommand(prCmd) || String(prev.cli || ''),
+      forge: String(prev.forge || 'unknown'),
+      remote_url: String(prev.remote_url || ''),
+      target_branch: String(prev.target_branch || targetBranch),
+      source_branch: String(prev.source_branch || sourceBranch),
+      via: 'dod_action',
+      command: prCmd,
+    };
+  }
+}
+
 function ensureTaskSessionClosed(task: AnyObj): void {
   const session = String(task.tmux_session || '');
   if (!session) return;
@@ -972,6 +1035,7 @@ function applyDodOnStatusTransition(task: AnyObj, oldStatus: string, nextStatus:
   if (oldStatus === nextStatus) return;
   if (nextStatus === 'pending' || nextStatus === 'success') {
     task.dod = evaluateDefaultDod(task);
+    syncPublishPrFromDod(task);
     return;
   }
   clearDod(task);
