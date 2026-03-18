@@ -1,7 +1,7 @@
 # OpenClaw Agent Swarm
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](code/src/swarm.ts)
+[![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](skills/openclaw-agent-swarm/scripts/swarm.ts)
 
 **OpenClaw Agent Swarm** is a robust execution layer for AI agents (Codex, Claude Code, Gemini). It enables agents to handle complex coding tasks in parallel with **physical isolation**, **persistence**, and **explicit state tracking**.
 

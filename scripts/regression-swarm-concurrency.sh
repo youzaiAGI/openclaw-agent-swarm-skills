@@ -2,19 +2,31 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SWARM_JS="$ROOT_DIR/skills/openclaw-agent-swarm/scripts/swarm.js"
+SWARM_TS="$ROOT_DIR/skills/openclaw-agent-swarm/scripts/swarm.ts"
 STATE_DIR="$HOME/.agents/agent-swarm/tasks"
 
-if [[ ! -f "$SWARM_JS" ]]; then
-  echo "ERROR: swarm script not found: $SWARM_JS" >&2
+if [[ ! -f "$SWARM_TS" ]]; then
+  echo "ERROR: swarm script not found: $SWARM_TS" >&2
   exit 1
 fi
 
+if command -v bun >/dev/null 2>&1; then
+  BUN_X=(bun)
+elif command -v npx >/dev/null 2>&1; then
+  BUN_X=(npx -y bun)
+else
+  echo "ERROR: bun runtime is required. Install bun from https://bun.sh/" >&2
+  exit 1
+fi
 command -v node >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
 command -v codex >/dev/null 2>&1 || { echo "ERROR: codex is required" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "ERROR: claude is required" >&2; exit 1; }
 command -v gemini >/dev/null 2>&1 || { echo "ERROR: gemini is required" >&2; exit 1; }
+
+run_swarm() {
+  "${BUN_X[@]}" "$SWARM_TS" "$@"
+}
 
 # policy knobs (script-side external timeout control)
 BATCH_RUNNING_KILL_SEC=180
@@ -103,7 +115,7 @@ while IFS=$'\t' read -r agent mode kind expected_file expected_msg task; do
   fi
 
   (
-    node "$SWARM_JS" spawn \
+    run_swarm spawn \
       --repo "$TMP_REPO" \
       --mode "$mode" \
       --agent "$agent" \
@@ -260,7 +272,7 @@ cancel_task() {
   local id="$1"
   local reason="$2"
   local out
-  out="$(node "$SWARM_JS" cancel --id "$id" --reason "$reason")"
+  out="$(run_swarm cancel --id "$id" --reason "$reason")"
   local ok
   ok="$(CANCEL_JSON="$out" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const ok=(Boolean(d.cancelled)&&String(d.status||"")==="stopped")||Boolean(d.already_terminal);process.stdout.write(String(ok));')"
   if [[ "$ok" != "true" ]]; then
@@ -272,7 +284,7 @@ cancel_task() {
 
 cancel_non_terminal_tasks() {
   local json
-  json="$(node "$SWARM_JS" check --json)"
+  json="$(run_swarm check --json)"
   for id in "${TASK_IDS[@]}"; do
     local st
     st="$(status_of "$json" "$id")"
@@ -293,7 +305,7 @@ batch_pass_count=0
 batch_fail_count=0
 batch_start_ts="$(date +%s)"
 while true; do
-  json="$(node "$SWARM_JS" check --json)"
+  json="$(run_swarm check --json)"
   now_ts="$(date +%s)"
   elapsed=$((now_ts - batch_start_ts))
   all_done=1
@@ -334,7 +346,7 @@ while true; do
   sleep "$POLL_SEC"
 done
 
-json_batch_final="$(node "$SWARM_JS" check --json)"
+json_batch_final="$(run_swarm check --json)"
 for id in "${BATCH_IDS[@]}"; do
   st="$(status_of "$json_batch_final" "$id")"
   if [[ "$st" == "success" ]]; then
@@ -361,7 +373,7 @@ interactive_pass_count=0
 interactive_fail_count=0
 declare -a INTERACTIVE_READY_IDS=()
 for id in "${INTERACTIVE_IDS[@]}"; do
-  attach_json="$(node "$SWARM_JS" attach --id "$id" --message "回归附加指令：请回复已收到并继续等待")"
+  attach_json="$(run_swarm attach --id "$id" --message "回归附加指令：请回复已收到并继续等待")"
   attach_sent="$(ATTACH_JSON="$attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
   if [[ "$attach_sent" != "true" ]]; then
     echo "[ERROR] attach expected sent=true for running interactive task: $id"
@@ -401,7 +413,7 @@ wait_interactive_quiet_then_pending() {
     fi
     quiet_sec=$((now_ts - last_change))
 
-    json="$(node "$SWARM_JS" check --json)"
+    json="$(run_swarm check --json)"
     st="$(status_of "$json" "$id")"
     echo "[CHECK][interactive] $id status=$st quiet=${quiet_sec}s elapsed=${elapsed}s"
 
@@ -432,7 +444,7 @@ wait_task_stopped() {
   while true; do
     now_ts="$(date +%s)"
     elapsed=$((now_ts - start_ts))
-    json="$(node "$SWARM_JS" check --json)"
+    json="$(run_swarm check --json)"
     st="$(status_of "$json" "$id")"
     if [[ "$st" == "stopped" ]]; then
       return 0
@@ -478,7 +490,7 @@ total_fail=$((batch_fail_count + interactive_fail_count))
 echo "[SUMMARY] batch_pass=${batch_pass_count}/${#BATCH_IDS[@]} batch_fail=${batch_fail_count}/${#BATCH_IDS[@]}"
 echo "[SUMMARY] interactive_pass=${interactive_pass_count}/${#INTERACTIVE_IDS[@]} interactive_fail=${interactive_fail_count}/${#INTERACTIVE_IDS[@]}"
 echo "[SUMMARY] total_pass=${total_pass}/${#TASK_IDS[@]} total_fail=${total_fail}/${#TASK_IDS[@]}"
-json_end="$(node "$SWARM_JS" check --json)"
+json_end="$(run_swarm check --json)"
 
 # 4) all tasks must have DoD pass
 dod_fail=0

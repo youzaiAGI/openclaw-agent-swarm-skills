@@ -8,8 +8,8 @@ Thank you for your interest in contributing to the project! We welcome contribut
 2.  **Suggest Features**: Share your ideas for new functionalities.
 3.  **Code Contributions**:
     - **Fork and Clone**: Fork the repository and clone it to your local machine.
-    - **Edit TypeScript**: All logic lives in `code/src/swarm.ts`.
-    - **Build and Sync**: Run `cd code && npm run build` and then `./scripts/build-skill.sh` to update the production JavaScript.
+    - **Edit TypeScript**: All logic lives in `skills/openclaw-agent-swarm/scripts/swarm.ts`.
+    - **Use runtime**: Resolve `${BUN_X}` as `bun` (preferred) or `npx -y bun` (fallback), then run the script directly.
     - **Run Tests**: Use `./scripts/regression-swarm-concurrency.sh` to verify your changes.
     - **Submit a Pull Request**: Provide a clear description of your changes and why they are beneficial.
 
@@ -22,7 +22,7 @@ Thank you for your interest in contributing to the project! We welcome contribut
 
 ## Important Note
 
-The `skills/openclaw-agent-swarm/scripts/swarm.js` file is **generated**. Any changes made directly to this file will be lost upon the next build. Always modify `code/src/swarm.ts`.
+The `skills/openclaw-agent-swarm/scripts/swarm.ts` file is the executable source of truth.
 
 ---
 

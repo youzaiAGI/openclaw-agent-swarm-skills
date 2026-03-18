@@ -1,7 +1,7 @@
 # OpenClaw Agent Swarm
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
-[![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](../code/src/swarm.ts)
+[![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](../skills/openclaw-agent-swarm/scripts/swarm.ts)
 
 **OpenClaw Agent Swarm** 是一个为 AI Agent（如 Codex、Claude Code、Gemini）设计的鲁棒执行层。它通过 **物理隔离**、**执行持久化** 和 **显式状态追踪**，使 Agent 能够并行处理复杂的编程任务。
 

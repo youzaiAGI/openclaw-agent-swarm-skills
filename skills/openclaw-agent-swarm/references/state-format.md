@@ -1,6 +1,6 @@
 # State Format
 
-`swarm.js` prints JSON to stdout.
+`swarm.ts` prints JSON to stdout.
 
 ## Storage
 

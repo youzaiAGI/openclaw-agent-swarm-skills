@@ -1,11 +1,12 @@
 # CLI Reference
 
-The primary entry point for OpenClaw Agent Swarm is the `swarm.js` script. It supports several subcommands for managing the full lifecycle of a task.
+The primary entry point for OpenClaw Agent Swarm is the `swarm.ts` script. It supports several subcommands for managing the full lifecycle of a task.
 
 ## Common Entry Point
 
 ```bash
-node skills/openclaw-agent-swarm/scripts/swarm.js <command> [options]
+if command -v bun >/dev/null 2>&1; then BUN_X=(bun); elif command -v npx >/dev/null 2>&1; then BUN_X=(npx -y bun); else echo "Install bun: https://bun.sh/" >&2; exit 1; fi
+"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts <command> [options]
 ```
 
 ---

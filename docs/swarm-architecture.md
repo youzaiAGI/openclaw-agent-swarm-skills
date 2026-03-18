@@ -14,7 +14,7 @@
 
 ### 1.2 关键组件
 
-- 主控制器：`swarm.js`（源码：`code/src/swarm.ts`）
+- 主控制器：`swarm.ts`（源码：`skills/openclaw-agent-swarm/scripts/swarm.ts`）
 - 会话运行时：`tmux`
 - 任务执行器：`codex` / `claude` CLI
 - 状态存储：`~/.agents/agent-swarm/tasks/<task_id>.json`

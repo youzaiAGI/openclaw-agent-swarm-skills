@@ -11,9 +11,9 @@ OpenClaw Agent Swarm is designed to provide a robust and isolated execution laye
 ## 2. Execution Layers
 
 ### Coordinator Layer
-The coordinator (usually an external LLM agent or runtime) issues commands to the `swarm.js` entry point. It polls for changes via `check --changes-only`.
+The coordinator (usually an external LLM agent or runtime) issues commands to the `swarm.ts` entry point. It polls for changes via `check --changes-only`.
 
-### Swarm Skill Layer (`swarm.js`)
+### Swarm Skill Layer (`swarm.ts`)
 This layer handles the lifecycle of a task:
 1. **Validation**: Checks for tools and git repository status.
 2. **Setup**: Creates a Git worktree and a new branch (`swarm/<task_id>`).

@@ -8,31 +8,35 @@ To build and test from source, you need:
 
 - **Node.js**: >= 18
 - **npm**: (or yarn/pnpm)
-- **TypeScript**: The logic is written in `code/src/swarm.ts`.
+- **TypeScript**: The logic is written in `skills/openclaw-agent-swarm/scripts/swarm.ts`.
+- **Runtime**: `bun` (preferred) or `npx` (fallback to `npx -y bun`).
 
 ## 2. Project Structure
 
-- `code/src/swarm.ts`: The source of truth (TypeScript).
-- `skills/openclaw-agent-swarm/scripts/swarm.js`: The compiled production script (DO NOT EDIT DIRECTLY).
-- `scripts/build-skill.sh`: Synchronizes the compiled JS to the skill directory.
+- `skills/openclaw-agent-swarm/scripts/swarm.ts`: The source of truth (TypeScript, executable).
+- `skills/openclaw-agent-swarm/scripts/check-agents.sh`: Polling wrapper script.
 
 ## 3. Local Development Workflow
 
-1.  **Install dependencies**:
+1.  **Resolve runtime**:
     ```bash
-    cd code
-    npm install
+    if command -v bun >/dev/null 2>&1; then
+      BUN_X=(bun)
+    elif command -v npx >/dev/null 2>&1; then
+      BUN_X=(npx -y bun)
+    else
+      echo "Install bun first: https://bun.sh/" >&2
+      exit 1
+    fi
     ```
 
 2.  **Make changes**:
-    Modify `code/src/swarm.ts`.
+    Modify `skills/openclaw-agent-swarm/scripts/swarm.ts`.
 
-3.  **Build and Sync**:
+3.  **Run directly**:
     From the project root:
     ```bash
-    cd code && npm run build
-    cd ..
-    ./scripts/build-skill.sh
+    "${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts list
     ```
 
 4.  **Regression Testing**:

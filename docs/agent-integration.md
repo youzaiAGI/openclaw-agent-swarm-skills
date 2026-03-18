@@ -16,13 +16,14 @@ You can specify the agent at task creation:
 
 ```bash
 # Using Claude Code
-node skills/openclaw-agent-swarm/scripts/swarm.js spawn \
+if command -v bun >/dev/null 2>&1; then BUN_X=(bun); elif command -v npx >/dev/null 2>&1; then BUN_X=(npx -y bun); else echo "Install bun: https://bun.sh/" >&2; exit 1; fi
+"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts spawn \
   --agent claude \
   --task "Fix bug in API layer" \
   ...
 
 # Using Codex
-node skills/openclaw-agent-swarm/scripts/swarm.js spawn \
+"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts spawn \
   --agent codex \
   --task "Implement feature Y" \
   ...
@@ -46,4 +47,4 @@ The swarm generates a default system prompt for the agent, which includes:
 
 ## 5. Heartbeat & Polling
 
-The coordinator agent should use `check-agents.sh` or `swarm.js check --changes-only` to poll for status updates. This is crucial for long-running tasks.
+The coordinator agent should use `check-agents.sh` or `swarm.ts check --changes-only` to poll for status updates. This is crucial for long-running tasks.

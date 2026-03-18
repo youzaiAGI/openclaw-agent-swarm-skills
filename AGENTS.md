@@ -1,8 +1,7 @@
 # Agent Notes
 
-- `skills/openclaw-agent-swarm/scripts/swarm.js` is a build artifact.
-- Do not edit generated `.js` files directly.
-- Make changes in `code/src/*` and sync artifacts via `scripts/build-skill.sh`.
+- `skills/openclaw-agent-swarm/scripts/swarm.ts` is the executable source of truth.
+- Run the skill with `${BUN_X}` (`bun` preferred, `npx -y bun` fallback).
 
 ## Regression Checklist (Swarm)
 

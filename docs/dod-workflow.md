@@ -33,7 +33,8 @@ Beyond built-in checks, you can define higher-level semantic rules. These rules 
 Once semantic validation is complete, the coordinator should use the `update-dod` command to record the result.
 
 ```bash
-node skills/openclaw-agent-swarm/scripts/swarm.js update-dod \
+if command -v bun >/dev/null 2>&1; then BUN_X=(bun); elif command -v npx >/dev/null 2>&1; then BUN_X=(npx -y bun); else echo "Install bun: https://bun.sh/" >&2; exit 1; fi
+"${BUN_X[@]}" skills/openclaw-agent-swarm/scripts/swarm.ts update-dod \
   --id <task-id> \
   --status pass \
   --result '{"summary":"All semantic checks and required tests passed","error":""}'

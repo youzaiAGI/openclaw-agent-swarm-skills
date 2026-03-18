@@ -39,7 +39,21 @@ Before using this skill, verify these tools are installed:
 - `git` (required)
 - `tmux` (required)
 - At least one agent: `codex`, `claude`, or `gemini` (required)
+- Runtime for executing `swarm.ts`: `bun` (preferred) or `npx` (fallback to `npx -y bun`)
 - Optional: `gh` (GitHub CLI) or `glab` (GitLab CLI) for automatic PR creation
+
+Resolve `${BUN_X}` runtime once in your shell:
+
+```bash
+if command -v bun >/dev/null 2>&1; then
+  BUN_X=(bun)
+elif command -v npx >/dev/null 2>&1; then
+  BUN_X=(npx -y bun)
+else
+  echo "bun is required. Install it: https://bun.sh/" >&2
+  exit 1
+fi
+```
 
 ## Quick Start
 
@@ -53,7 +67,7 @@ Before using this skill, verify these tools are installed:
 ### Example: Spawn a Simple Task
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo /path/to/your/repo \
   --task "Add error handling to the login function" \
   --mode batch
@@ -72,7 +86,7 @@ This shows only tasks that changed status since last check. Use this in a heartb
 ### Example: Publish When Done
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" publish \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task_id> \
   --auto-pr
 ```
@@ -139,7 +153,7 @@ When a task fails or needs more work, spawn a follow-up:
 
 Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 
-- Main script: `$SKILL_DIR/scripts/swarm.js`
+- Main script: `$SKILL_DIR/scripts/swarm.ts`
 - Check wrapper: `$SKILL_DIR/scripts/check-agents.sh`
 - DoD rules: `$SKILL_DIR/references/dod.md` (optional semantic rules)
 - State format: `$SKILL_DIR/references/state-format.md` (JSON schemas)
@@ -149,7 +163,7 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 ### spawn - Create New Task
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo <path> \
   --task "<description>" \
   [--mode interactive|batch] \
@@ -171,7 +185,7 @@ node "$SKILL_DIR/scripts/swarm.js" spawn \
 
 **Example:**
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Fix the memory leak in the cache module" \
   --mode batch \
@@ -181,7 +195,7 @@ node "$SKILL_DIR/scripts/swarm.js" spawn \
 ### spawn-followup - Continue Failed/Stopped Task
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <parent-task-id> \
   --task "<new-instructions>" \
   --session-mode new|reuse \
@@ -201,7 +215,7 @@ node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
 **Example:**
 ```bash
 # Parent task failed, spawn follow-up with fresh session
-node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from 20260316-143022-a1b2c3 \
   --task "The previous attempt failed because of missing imports. Fix the imports and try again." \
   --session-mode new
@@ -210,7 +224,7 @@ node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
 ### attach - Send Message to Interactive Task
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" attach \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id <task-id> \
   --message "<text>"
 ```
@@ -219,7 +233,7 @@ node "$SKILL_DIR/scripts/swarm.js" attach \
 
 **Example:**
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" attach \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id 20260316-143022-a1b2c3 \
   --message "Also add unit tests for the new function"
 ```
@@ -232,7 +246,7 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
 
 Or directly:
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" check --changes-only
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" check --changes-only
 ```
 
 **What it does:**
@@ -248,13 +262,13 @@ node "$SKILL_DIR/scripts/swarm.js" check --changes-only
 
 ```bash
 # Get specific task (always refreshes status)
-node "$SKILL_DIR/scripts/swarm.js" status --id <task-id>
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
 
 # Search by query (branch name, task description, etc.)
-node "$SKILL_DIR/scripts/swarm.js" status --query "login"
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --query "login"
 
 # Get latest 10 tasks (no refresh)
-node "$SKILL_DIR/scripts/swarm.js" status
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status
 ```
 
 **Output:** Task summary with `next_step` guidance in Chinese.
@@ -262,7 +276,7 @@ node "$SKILL_DIR/scripts/swarm.js" status
 ### list - Show All Active Tasks
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" list
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" list
 ```
 
 Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
@@ -270,7 +284,7 @@ Returns all tasks in `~/.agents/agent-swarm/tasks/` (excludes archived tasks).
 ### update-dod - Manually Update DoD Status
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" update-dod \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" update-dod \
   --id <task-id> \
   --status pass|fail \
   --result '{"summary":"Custom DoD check passed","error":""}'
@@ -281,7 +295,7 @@ Use this when you have custom DoD criteria beyond the defaults (e.g., "must have
 ### publish - Push Branch to Remote
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" publish \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task-id> \
   [--remote origin] \
   [--target-branch main] \
@@ -299,7 +313,7 @@ node "$SKILL_DIR/scripts/swarm.js" publish \
 ### create-pr - Create PR/MR
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" create-pr \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" create-pr \
   --id <task-id> \
   [--remote origin] \
   [--target-branch main] \
@@ -312,7 +326,7 @@ Pushes branch first, then creates PR using `gh` (GitHub) or `glab` (GitLab) if a
 ### cancel - Stop Running Task
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" cancel \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel \
   --id <task-id> \
   [--reason "why you're cancelling"]
 ```
@@ -325,7 +339,7 @@ Kills the tmux session and sets task status to `stopped`.
 
 ```bash
 # 1. Spawn task
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add logging to the payment processor" \
   --mode batch
@@ -334,7 +348,7 @@ node "$SKILL_DIR/scripts/swarm.js" spawn \
 bash "$SKILL_DIR/scripts/check-agents.sh"
 
 # 3. When it shows success, publish
-node "$SKILL_DIR/scripts/swarm.js" publish \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
   --id <task-id> \
   --auto-pr
 ```
@@ -343,41 +357,41 @@ node "$SKILL_DIR/scripts/swarm.js" publish \
 
 ```bash
 # 1. Spawn interactive task
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Refactor the authentication module" \
   --mode interactive
 
 # 2. Send additional instructions
-node "$SKILL_DIR/scripts/swarm.js" attach \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id <task-id> \
   --message "Also update the tests to match the new structure"
 
 # 3. Check status
-node "$SKILL_DIR/scripts/swarm.js" status --id <task-id>
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
 
 # 4. When satisfied, cancel to stop (triggers DoD evaluation)
-node "$SKILL_DIR/scripts/swarm.js" cancel --id <task-id>
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel --id <task-id>
 
 # 5. If DoD passes, publish
-node "$SKILL_DIR/scripts/swarm.js" publish --id <task-id> --auto-pr
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish --id <task-id> --auto-pr
 ```
 
 ### Workflow 3: Parallel Tasks
 
 ```bash
 # Spawn multiple tasks at once
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Fix bug #123 in checkout flow" \
   --mode batch
 
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add dark mode support to settings page" \
   --mode batch
 
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Update dependencies to latest versions" \
   --mode batch
@@ -390,13 +404,13 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
 
 ```bash
 # 1. Task failed, check what happened
-node "$SKILL_DIR/scripts/swarm.js" status --id <failed-task-id>
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <failed-task-id>
 
 # 2. Read the log to understand the failure
 cat ~/.agents/agent-swarm/logs/<task-id>.log | tail -100
 
 # 3. Spawn follow-up with fix instructions
-node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <failed-task-id> \
   --task "The test failed because of missing mock data. Add the mock data and rerun tests." \
   --session-mode new
@@ -468,7 +482,7 @@ Add semantic rules to `$SKILL_DIR/references/dod.md` (e.g., "must push to remote
 ### Custom DoD with Required Tests
 
 ```bash
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Implement user profile page" \
   --mode batch \
@@ -483,13 +497,13 @@ Each test must pass for DoD to succeed. Tests run with 5-minute timeout.
 
 ```bash
 # Original task
-node "$SKILL_DIR/scripts/swarm.js" spawn \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add user authentication" \
   --mode interactive
 
 # After it stops, continue in same worktree with conversation history
-node "$SKILL_DIR/scripts/swarm.js" spawn-followup \
+"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
   --from <task-id> \
   --task "Now add password reset functionality" \
   --session-mode reuse
@@ -522,12 +536,12 @@ Set up a cron to run `check-agents.sh` every 10-15 minutes for automatic notific
 ### Common Issues
 
 **"task is not publishable for mode/status"**
-- Check task status: `node "$SKILL_DIR/scripts/swarm.js" status --id <task-id>`
+- Check task status: `"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
 - For batch mode, task must be `success`
 - For interactive mode, task must be `stopped` (use `cancel` to stop it)
 
 **"task DoD not pass"**
-- Check DoD details: `node "$SKILL_DIR/scripts/swarm.js" status --id <task-id>`
+- Check DoD details: `"${BUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
 - Look at `dod.result.reason` to see what failed
 - Common causes: uncommitted changes, test failures
 - Fix issues and spawn follow-up, or manually update DoD if appropriate

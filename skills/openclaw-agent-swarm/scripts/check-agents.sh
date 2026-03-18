@@ -3,9 +3,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SWARM_JS="$SCRIPT_DIR/swarm.js"
-if [[ ! -f "$SWARM_JS" ]]; then
-  SWARM_JS="$ROOT_DIR/skills/openclaw-agent-swarm/scripts/swarm.js"
+SWARM_TS="$SCRIPT_DIR/swarm.ts"
+if [[ ! -f "$SWARM_TS" ]]; then
+  SWARM_TS="$ROOT_DIR/skills/openclaw-agent-swarm/scripts/swarm.ts"
+fi
+if [[ ! -f "$SWARM_TS" ]]; then
+  echo "ERROR: swarm script not found: $SWARM_TS" >&2
+  exit 1
+fi
+
+if command -v bun >/dev/null 2>&1; then
+  BUN_X=(bun)
+elif command -v npx >/dev/null 2>&1; then
+  BUN_X=(npx -y bun)
+else
+  echo "ERROR: bun runtime is required. Install bun from https://bun.sh/" >&2
+  exit 1
 fi
 LOCK_FILE="${HOME}/.agents/agent-swarm/check-agents.lock"
 
@@ -17,4 +30,4 @@ if ! flock -n 9; then
   exit 0
 fi
 
-node "$SWARM_JS" check --changes-only "$@"
+"${BUN_X[@]}" "$SWARM_TS" check --changes-only "$@"
