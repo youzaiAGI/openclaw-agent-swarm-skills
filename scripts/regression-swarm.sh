@@ -62,11 +62,14 @@ case "$SUITE" in
   all)
     run_concurrency
     run_dod_json
+    echo "[SUMMARY][OVERALL] suite=all result=pass"
     ;;
   concurrency)
     run_concurrency
+    echo "[SUMMARY][OVERALL] suite=concurrency result=pass"
     ;;
   dod-json)
     run_dod_json
+    echo "[SUMMARY][OVERALL] suite=dod-json result=pass"
     ;;
 esac

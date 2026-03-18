@@ -74,6 +74,21 @@ run_swarm() {
   "${RUN_X[@]}" "$SWARM_TS" "$@"
 }
 
+swarm_json() {
+  local label="$1"
+  shift
+  local out
+  echo "[SWARM][CALL] $label :: $*" >&2
+  if ! out="$(run_swarm "$@" 2>&1)"; then
+    echo "[SWARM][RET][FAIL] $label" >&2
+    echo "$out" >&2
+    return 1
+  fi
+  echo "[SWARM][RET][OK] $label" >&2
+  echo "$out" >&2
+  printf '%s' "$out"
+}
+
 # policy knobs (script-side external timeout control)
 BATCH_RUNNING_KILL_SEC=180
 INTERACTIVE_LOG_QUIET_TO_PENDING_SEC=60
@@ -181,6 +196,10 @@ done
 if [[ "$spawn_fail" -ne 0 ]]; then
   echo "[ERROR] spawn phase failed"
   for id in "${TASK_IDS[@]}"; do
+    if [[ -f /tmp/"${id}".spawn.out ]]; then
+      out="$(cat /tmp/"${id}".spawn.out || true)"
+      [[ -n "$out" ]] && echo "[SWARM][RET][spawn:$id] $out"
+    fi
     if [[ -f /tmp/"${id}".spawn.err ]]; then
       err="$(cat /tmp/"${id}".spawn.err || true)"
       [[ -n "$err" ]] && echo "[SPAWN_ERR] $id :: $err"
@@ -190,6 +209,16 @@ if [[ "$spawn_fail" -ne 0 ]]; then
 fi
 
 echo "[INFO] spawn phase ok (${#TASK_IDS[@]} tasks)"
+for id in "${TASK_IDS[@]}"; do
+  if [[ -f /tmp/"${id}".spawn.out ]]; then
+    out="$(cat /tmp/"${id}".spawn.out || true)"
+    [[ -n "$out" ]] && echo "[SWARM][RET][spawn:$id] $out"
+  fi
+  if [[ -f /tmp/"${id}".spawn.err ]]; then
+    err="$(cat /tmp/"${id}".spawn.err || true)"
+    [[ -n "$err" ]] && echo "[SWARM][RET][spawn:$id:stderr] $err"
+  fi
+done
 echo "[PROGRESS] phase=spawn"
 for id in "${TASK_IDS[@]}"; do
   echo "[PROGRESS][spawn] task=$id status=spawned"
@@ -256,6 +285,22 @@ get_task_log() {
   node -e "const fs=require('fs');const t=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(t.log||''));" "$task_json"
 }
 
+print_task_result() {
+  local task_id="$1"
+  local pass="$2"
+  local note="$3"
+  local task_json
+  local log_path
+  local worktree
+  task_json="$(task_json_path "$task_id")"
+  log_path="$(get_task_log "$task_id" || true)"
+  worktree="$(get_task_worktree "$task_id" || true)"
+  echo "[RESULT][TASK] task=$task_id pass=$pass note=$note"
+  echo "[RESULT][PATH] task=$task_id task_json=$task_json"
+  echo "[RESULT][PATH] task=$task_id log=${log_path:-missing}"
+  echo "[RESULT][PATH] task=$task_id worktree=${worktree:-missing}"
+}
+
 get_mtime() {
   local p="$1"
   if [[ -z "$p" || ! -e "$p" ]]; then
@@ -320,7 +365,7 @@ cancel_task() {
   local reason="$2"
   local expected_statuses="${3:-stopped}"
   local out
-  out="$(run_swarm cancel --id "$id" --reason "$reason")"
+  out="$(swarm_json "cancel:$id" cancel --id "$id" --reason "$reason")"
   local ok
   ok="$(CANCEL_JSON="$out" EXPECTED_STATUSES="$expected_statuses" node -e 'const d=JSON.parse(process.env.CANCEL_JSON||"{}");const expected=String(process.env.EXPECTED_STATUSES||"stopped").split(",").map(s=>s.trim()).filter(Boolean);const st=String(d.status||"");const ok=(Boolean(d.cancelled)&&expected.includes(st))||Boolean(d.already_terminal);process.stdout.write(String(ok));')"
   if [[ "$ok" != "true" ]]; then
@@ -332,7 +377,7 @@ cancel_task() {
 
 cancel_non_terminal_tasks() {
   local json
-  json="$(run_swarm check --json)"
+  json="$(swarm_json "check:cleanup" check --json)"
   for id in "${TASK_IDS[@]}"; do
     local st
     st="$(status_of "$json" "$id")"
@@ -353,7 +398,7 @@ batch_pass_count=0
 batch_fail_count=0
 batch_start_ts="$(date +%s)"
 while true; do
-  json="$(run_swarm check --json)"
+  json="$(swarm_json "check:batch" check --json)"
   now_ts="$(date +%s)"
   elapsed=$((now_ts - batch_start_ts))
   all_done=1
@@ -394,13 +439,20 @@ while true; do
   sleep "$POLL_SEC"
 done
 
-json_batch_final="$(run_swarm check --json)"
+json_batch_final="$(swarm_json "check:batch-final" check --json)"
 for id in "${BATCH_IDS[@]}"; do
   st="$(status_of "$json_batch_final" "$id")"
+  case_pass=0
   if [[ "$st" == "success" ]]; then
     batch_pass_count=$((batch_pass_count + 1))
+    case_pass=1
   else
     batch_fail_count=$((batch_fail_count + 1))
+  fi
+  if [[ "$case_pass" -eq 1 ]]; then
+    print_task_result "$id" "true" "batch_status_success"
+  else
+    print_task_result "$id" "false" "batch_status_${st}"
   fi
 done
 
@@ -408,6 +460,9 @@ for item in "${BATCH_WRITE_CASES[@]}"; do
   IFS='|' read -r task_id expected_file expected_msg <<< "$item"
   if ! validate_task_file_and_commit "$task_id" "$expected_file" "$expected_msg"; then
     batch_fail=1
+    print_task_result "$task_id" "false" "batch_write_file_commit_validation_failed"
+  else
+    print_task_result "$task_id" "true" "batch_write_file_commit_validation_passed"
   fi
 done
 
@@ -421,7 +476,7 @@ interactive_pass_count=0
 interactive_fail_count=0
 declare -a INTERACTIVE_READY_IDS=()
 for id in "${INTERACTIVE_IDS[@]}"; do
-  attach_json="$(run_swarm attach --id "$id" --message "回归附加指令：请回复已收到并继续等待")"
+  attach_json="$(swarm_json "attach:$id" attach --id "$id" --message "回归附加指令：请回复已收到并继续等待")"
   attach_sent="$(ATTACH_JSON="$attach_json" node -e 'const d=JSON.parse(process.env.ATTACH_JSON||"{}");process.stdout.write(String(Boolean(d.sent)));')"
   if [[ "$attach_sent" != "true" ]]; then
     echo "[ERROR] attach expected sent=true for running interactive task: $id"
@@ -430,6 +485,7 @@ for id in "${INTERACTIVE_IDS[@]}"; do
     cancel_task "$id" "attach_failed_cleanup" || true
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
+    print_task_result "$id" "false" "interactive_attach_failed"
     continue
   fi
   echo "[OK] attach verified: $id"
@@ -461,7 +517,7 @@ wait_interactive_quiet_then_pending() {
     fi
     quiet_sec=$((now_ts - last_change))
 
-    json="$(run_swarm check --json)"
+    json="$(swarm_json "check:interactive:$id" check --json)"
     st="$(status_of "$json" "$id")"
     echo "[CHECK][interactive] $id status=$st quiet=${quiet_sec}s elapsed=${elapsed}s"
 
@@ -493,7 +549,7 @@ wait_task_status() {
   while true; do
     now_ts="$(date +%s)"
     elapsed=$((now_ts - start_ts))
-    json="$(run_swarm check --json)"
+    json="$(swarm_json "check:wait:$id:$expected_status" check --json)"
     st="$(status_of "$json" "$id")"
     if [[ "$st" == "$expected_status" ]]; then
       return 0
@@ -512,6 +568,7 @@ for id in "${INTERACTIVE_READY_IDS[@]}"; do
   if ! wait_interactive_quiet_then_pending "$id" "$logp"; then
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
+    print_task_result "$id" "false" "interactive_pending_check_failed"
     continue
   fi
   echo "[OK] pending verified after quiet window: $id"
@@ -519,15 +576,18 @@ for id in "${INTERACTIVE_READY_IDS[@]}"; do
   if ! cancel_task "$id" "interactive_pending_verified_then_cancel" "success"; then
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
+    print_task_result "$id" "false" "interactive_cancel_failed"
     continue
   fi
   if ! wait_task_status "$id" "success" 60; then
     interactive_fail=1
     interactive_fail_count=$((interactive_fail_count + 1))
+    print_task_result "$id" "false" "interactive_wait_success_failed"
     continue
   fi
   echo "[OK] success verified after cancel: $id"
   interactive_pass_count=$((interactive_pass_count + 1))
+  print_task_result "$id" "true" "interactive_success_after_cancel"
 done
 
 if (( interactive_fail != 0 )); then
@@ -539,7 +599,7 @@ total_fail=$((batch_fail_count + interactive_fail_count))
 echo "[SUMMARY] batch_pass=${batch_pass_count}/${#BATCH_IDS[@]} batch_fail=${batch_fail_count}/${#BATCH_IDS[@]}"
 echo "[SUMMARY] interactive_pass=${interactive_pass_count}/${#INTERACTIVE_IDS[@]} interactive_fail=${interactive_fail_count}/${#INTERACTIVE_IDS[@]}"
 echo "[SUMMARY] total_pass=${total_pass}/${#TASK_IDS[@]} total_fail=${total_fail}/${#TASK_IDS[@]}"
-json_end="$(run_swarm check --json)"
+json_end="$(swarm_json "check:final" check --json)"
 
 # 4) all tasks must have DoD pass
 dod_fail=0
@@ -569,6 +629,8 @@ done
 if (( batch_fail != 0 || interactive_fail != 0 || dod_fail != 0 || write_fail != 0 )); then
   cancel_non_terminal_tasks
   echo "[FAIL] regression failed"
+  echo "[SUMMARY][OVERALL] concurrency regression=fail"
   exit 1
 fi
 echo "[PASS] regression passed (batch=success, interactive=success)"
+echo "[SUMMARY][OVERALL] concurrency regression=pass"
