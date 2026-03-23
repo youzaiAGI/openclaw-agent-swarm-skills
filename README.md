@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](skills/openclaw-agent-swarm/scripts/swarm.ts)
 
-**OpenClaw Agent Swarm** is a robust execution layer for AI agents (Codex, Claude Code, Gemini). It enables agents to handle complex coding tasks in parallel with **physical isolation**, **persistence**, and **explicit state tracking**.
+**OpenClaw Agent Swarm** is an execution layer for AI agents (Codex, Claude Code, Gemini) to handle parallel tasks with **physical isolation**, **persistence**, and **explicit state tracking**.
 
 English | [简体中文](docs/README.zh-CN.md)
 
@@ -75,8 +75,8 @@ claude --version  # or codex --version, or gemini --version
 
 The following examples are **prompts** you can send to your AI Agent (Claude, Codex, Gemini, etc.) once the skill is installed. The Agent will translate these into the appropriate CLI commands.
 
-### 1. Spawn a Task
-Tell your Agent to start a background task:
+### 1. Spawn a Task (Fire-and-Forget)
+Tell your Agent to start a background task. The agent spawns the task and **returns immediately** with a task ID - no waiting or polling:
 
 **Batch mode** (fire-and-forget):
 ```text

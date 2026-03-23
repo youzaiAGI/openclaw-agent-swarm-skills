@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](../skills/openclaw-agent-swarm/scripts/swarm.ts)
 
-**OpenClaw Agent Swarm** 是一个为 AI Agent（如 Codex、Claude Code、Gemini）设计的鲁棒执行层。它通过 **物理隔离**、**执行持久化** 和 **显式状态追踪**，使 Agent 能够并行处理复杂的编程任务。
+**OpenClaw Agent Swarm** 是一个为 AI Agent（Codex、Claude Code、Gemini）设计的执行层，支持通过 **物理隔离**、**执行持久化** 和 **显式状态追踪** 并行处理任务。
 
 [English](../README.md) | 简体中文
 
@@ -75,10 +75,10 @@ claude --version  # 或 codex --version, 或 gemini --version
 
 以下示例是你在安装该 Skill 后，可以直接发送给 AI Agent（Claude, Codex, Gemini 等）的 **Prompt 指令**。Agent 会自动将这些指令转化为相应的 CLI 命令去执行。
 
-### 1. 启动任务
-告诉你的 Agent 启动一个后台任务：
+### 1. 启动任务 (Fire-and-Forget)
+告诉你的 Agent 启动一个后台任务。Agent 会 spawn 任务并 **立即返回** 任务 ID - 不会等待或轮询：
 
-**批处理模式**（运行后即不管）：
+**批处理模式**（启动后即不管）：
 ```text
 在 ~/projects/my-app 中启动一个批处理任务，为 API 端点添加错误处理。
 运行 'npm test' 验证是否正常工作。
