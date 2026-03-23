@@ -1,6 +1,6 @@
 ---
 name: openclaw-agent-swarm
-description: Run coding tasks in parallel using isolated git worktrees and background agents (codex/claude/gemini). Use this when the user wants to run tasks asynchronously, work on multiple features simultaneously, execute long-running coding tasks in the background, spawn parallel agents, or manage multiple coding tasks at once. Triggers include "run this in the background", "work on multiple tasks", "spawn agents", "run in parallel", "create worktree tasks", or any request to handle multiple coding tasks concurrently.
+description: Spawn coding agents (codex/claude/gemini) in parallel across isolated git worktrees for async background execution. Use when user mentions "run in background", "parallel tasks", "spawn agents", "worktree tasks", "async execution", or wants to work on multiple features simultaneously. Fire-and-forget by default - spawn tasks and return immediately.
 ---
 
 # Agent Swarm
@@ -57,41 +57,15 @@ fi
 
 ## Quick Start
 
-### Basic Workflow
-
-1. **Spawn a task** - Creates isolated worktree and starts agent
-2. **Check status** - See what's running and what changed
-3. **Review results** - When task completes, check the output
-4. **Publish** - Push to remote and optionally create PR
-
-### Example: Spawn a Simple Task
-
 ```bash
+# Spawn a task (returns immediately with task ID)
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo /path/to/your/repo \
   --task "Add error handling to the login function" \
   --mode batch
 ```
 
-This creates a new worktree, spawns an agent, and runs the task in the background.
-
-### Example: Check What's Running
-
-```bash
-bash "$SKILL_DIR/scripts/check-agents.sh"
-```
-
-This shows only tasks that changed status since last check. Use this in a heartbeat/cron to get notifications.
-
-### Example: Publish When Done
-
-```bash
-"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
-  --id <task_id> \
-  --auto-pr
-```
-
-This pushes the branch and creates a PR automatically.
+See **Common Workflows** below for detailed usage patterns.
 
 ## Core Concepts
 
@@ -162,6 +136,34 @@ Determine `SKILL_DIR` as the directory containing this SKILL.md file.
 - Check wrapper: `$SKILL_DIR/scripts/check-agents.sh`
 - DoD spec example: `$SKILL_DIR/references/dod.json`
 - State format: `$SKILL_DIR/references/state-format.md` (JSON schemas)
+
+## Agent Behavior Guidelines
+
+**IMPORTANT: Fire-and-Forget Pattern**
+
+When using this skill, follow these rules:
+
+1. **Spawn and Return**: After running `spawn`, immediately return to the user with the task info (id, status, worktree). Do NOT poll, wait, or loop to check status.
+
+2. **Never Proactively Check**: The `check` command is designed for system cron/heartbeat jobs, not for agent-initiated polling. Do NOT call `check` or `status` after spawn unless:
+   - User explicitly asks about task status
+   - System heartbeat/cron provides check results to you
+
+3. **Trust Async Execution**: Tasks run independently in background. Your job is to spawn and inform, not to monitor.
+
+4. **User-Driven Follow-up**: Only query task status when the user asks. Use `status --id <task-id>` for specific tasks or `list` for overview.
+
+**Example of Correct Behavior**:
+```
+User: "帮我并行跑三个任务"
+Agent: [spawns 3 tasks, returns immediately]
+"已启动 3 个异步任务:
+- task-1 (id: 20260323-xxx): Fix bug #123
+- task-2 (id: 20260323-yyy): Add dark mode
+- task-3 (id: 20260323-zzz): Update deps
+
+任务正在后台运行，如需查看状态请告诉我。"
+```
 
 ## Commands Reference
 
@@ -264,9 +266,12 @@ Suggested search behavior:
   --message "Also add unit tests for the new function"
 ```
 
-### check - Poll All Tasks for Changes
+### check - System Heartbeat Task (NOT for Agent Polling)
+
+**This command is designed for system cron/heartbeat jobs only. Agents should NOT call this.**
 
 ```bash
+# For system heartbeat/cron only:
 bash "$SKILL_DIR/scripts/check-agents.sh"
 ```
 
@@ -284,7 +289,12 @@ Or directly:
 - Archives old terminal tasks (default: 24 hours)
 - Tracks reminder counts for long-running/pending tasks
 
-**Use this in a heartbeat/cron** to get automatic notifications when tasks complete or need attention.
+**When agents receive check results:**
+- System heartbeat runs `check-agents.sh` periodically
+- If tasks changed status, heartbeat passes results to agent
+- Agent can then notify user about completed/failed tasks
+
+**DO NOT call check after spawn.** Let system heartbeat handle it.
 
 ### status - Get Task Details
 
@@ -353,25 +363,35 @@ Kills the tmux session and sets task status:
 
 ## Common Workflows
 
-### Workflow 1: Simple Batch Task
+### Workflow 1: Simple Batch Task (Fire-and-Forget)
 
 ```bash
-# 1. Spawn task
+# Spawn task and return immediately
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Add logging to the payment processor" \
   --mode batch
 
-# 2. Check periodically (or set up cron)
-bash "$SKILL_DIR/scripts/check-agents.sh"
+# Returns: {"id": "20260323-xxx", "status": "running", ...}
+# Agent should inform user and STOP HERE. No polling.
+```
 
-# 3. When it shows success, publish
+**Later, when user asks or heartbeat provides check results:**
+```bash
+# User asks: "任务完成了吗？"
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id 20260323-xxx
+
+# Or heartbeat/cron runs and provides changes:
+# System runs: bash "$SKILL_DIR/scripts/check-agents.sh"
+# If task changed, agent receives the info and can notify user
+
+# When task succeeded, user may want to publish:
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish \
-  --id <task-id> \
+  --id 20260323-xxx \
   --auto-pr
 ```
 
-### Workflow 2: Interactive Task with Follow-ups
+### Workflow 2: Interactive Task (User-Driven)
 
 ```bash
 # 1. Spawn interactive task
@@ -379,26 +399,31 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
   --repo ~/projects/myapp \
   --task "Refactor the authentication module" \
   --mode interactive
+# Returns immediately with task id
+```
 
-# 2. Send additional instructions
+**Later, when user provides follow-up instructions:**
+```bash
+# User says: "让 agent 也更新测试"
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" attach \
   --id <task-id> \
   --message "Also update the tests to match the new structure"
+```
 
-# 3. Check status
+**When user wants to finish:**
+```bash
+# User asks: "完成了吗？帮我停止"
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
-
-# 4. When satisfied, cancel to stop (triggers DoD evaluation)
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" cancel --id <task-id>
 
-# 5. If DoD passes, publish
+# If DoD passes, publish
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" publish --id <task-id> --auto-pr
 ```
 
-### Workflow 3: Parallel Tasks
+### Workflow 3: Parallel Tasks (Fire-and-Forget)
 
 ```bash
-# Spawn multiple tasks at once
+# Spawn multiple tasks - return immediately after all spawns
 "${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
   --repo ~/projects/myapp \
   --task "Fix bug #123 in checkout flow" \
@@ -414,8 +439,15 @@ bash "$SKILL_DIR/scripts/check-agents.sh"
   --task "Update dependencies to latest versions" \
   --mode batch
 
-# Check all at once
-bash "$SKILL_DIR/scripts/check-agents.sh"
+# Returns: 3 task IDs. Agent informs user and STOPS.
+# DO NOT call check here. Let system heartbeat handle it.
+```
+
+**When user asks status or heartbeat provides updates:**
+```bash
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" list
+# Or for specific task:
+"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>
 ```
 
 ### Workflow 4: Failed Task Recovery
@@ -437,143 +469,11 @@ cat ~/.agents/agent-swarm/logs/<task-id>.log | tail -100
 
 ## How It Works
 
-### Directory Structure
-
-```
-~/.agents/agent-swarm/
-├── tasks/
-│   ├── <task-id>.json          # Task metadata
-│   └── history/
-│       └── <date>/             # Archived tasks
-├── worktree/
-│   └── <repo-name>/
-│       └── <task-id>/          # Isolated worktree
-├── logs/
-│   ├── <task-id>.log           # Agent output
-│   └── <task-id>.exit          # Exit code (batch mode)
-├── prompts/
-│   └── <task-id>.txt           # Task prompt
-└── agent-swarm-last-check.json # Change tracking
-```
-
-### Task State
-
-Each task is stored as JSON in `~/.agents/agent-swarm/tasks/<task-id>.json`:
-
-```json
-{
-  "id": "20260316-143022-a1b2c3",
-  "mode": "batch",
-  "status": "running",
-  "agent": "codex",
-  "repo": "/Users/you/projects/myapp",
-  "worktree": "~/.agents/agent-swarm/worktree/myapp/20260316-143022-a1b2c3",
-  "branch": "swarm/20260316-143022-a1b2c3",
-  "base_branch": "main",
-  "tmux_session": "swarm-batch-20260316-143022-a1b2c3",
-  "task": "Add error handling to the login function",
-  "dod_spec": {
-    "checks": {
-      "allowed_statuses": ["pending", "success"],
-      "require_clean_worktree": true,
-      "require_commits_ahead_base": false,
-      "ci_commands": ["npm test -- --run"]
-    },
-    "actions": {
-      "push_command": "git push -u origin HEAD",
-      "pr_command": ""
-    }
-  },
-  "dod": {},
-  "created_at": "2026-03-16T14:30:22.000Z",
-  "updated_at": "2026-03-16T14:30:22.000Z"
-}
-```
-
-### DoD Evaluation
-
-DoD is automatically evaluated when status changes to `pending` or `success`.
-
-**Default checks:**
-1. Status is in `dod_spec.checks.allowed_statuses`
-2. Worktree cleanliness check (if enabled)
-3. Ahead-of-base commit check (if enabled)
-4. All `dod_spec.checks.ci_commands` exit with code 0
-5. On `success`: execute `dod_spec.actions.push_command` and `dod_spec.actions.pr_command` (if provided)
+Tasks run in isolated git worktrees inside tmux sessions. For internal architecture details (directory structure, task state JSON, DoD evaluation), see `$SKILL_DIR/references/architecture.md`.
 
 ## Advanced Usage
 
-### Custom DoD with JSON Spec
-
-```bash
-"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
-  --repo ~/projects/myapp \
-  --task "Implement user profile page" \
-  --mode batch \
-  --ci-commands "npm run lint,npm test -- --run,npm run type-check" \
-  --dod-json-file "$SKILL_DIR/references/dod.json"
-```
-
-Each CI command must pass for DoD to succeed. Commands run with 5-minute timeout.
-
-### Reusing Worktrees for Follow-ups
-
-```bash
-# Original task
-"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn \
-  --repo ~/projects/myapp \
-  --task "Add user authentication" \
-  --mode interactive \
-  --dod-json-file "$SKILL_DIR/references/dod.json"
-
-# After it stops, continue in same worktree with conversation history
-"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" spawn-followup \
-  --from <task-id> \
-  --task "Now add password reset functionality" \
-  --session-mode reuse \
-  --dod-json-file "$SKILL_DIR/references/dod.json"
-```
-
-**Session mode comparison:**
-- `new`: Fresh agent session, same worktree (good for fixing failures)
-- `reuse`: Continues conversation, same worktree (good for iterative work)
-
-### Automatic Reminders
-
-The `check` command tracks long-running tasks and emits reminders:
-
-- **Interactive pending**: Reminder after 3 hours of inactivity
-- **Batch running**: Reminder after 3 hours of execution
-- Max 3 reminders per task, one per hour
-
-Set up a cron to run `check-agents.sh` every 10-15 minutes for automatic notifications.
-
-## Global State Files
-
-- `~/.agents/agent-swarm/tasks/<task_id>.json` - Current task state
-- `~/.agents/agent-swarm/agent-swarm-last-check.json` - Change tracking for notifications
-- `~/.agents/agent-swarm/logs/<task_id>.log` - Full agent output
-- `~/.agents/agent-swarm/logs/<task_id>.exit` - Exit code (batch mode only)
-- `~/.agents/agent-swarm/prompts/<task_id>.txt` - Original task prompt
-
-## Error Handling
-
-### Common Issues
-
-**"task DoD not pass"**
-- Check DoD details: `"${RUN_X[@]}" "$SKILL_DIR/scripts/swarm.ts" status --id <task-id>`
-- Look at `dod.result.reason` to see what failed
-- Common causes: uncommitted changes, no commits ahead of base, CI/push/PR command failures
-- Fix issues and spawn follow-up, or manually update DoD if appropriate
-
-**"attach_not_supported_in_batch_mode"**
-- Batch tasks can't receive messages after spawn
-- Use `spawn-followup` instead to create a new task
-
-**"reuse_guard_failed"**
-- Parent worktree is missing or invalid
-- Parent tmux session is still running
-- Use `--session-mode new` instead, or cancel parent first
+For advanced patterns (custom DoD, worktree reuse, automatic reminders), see `$SKILL_DIR/references/advanced.md`.
 
 ## Integration with Heartbeat/Cron
 
@@ -583,35 +483,16 @@ Add this to your `HEARTBEAT.md` or cron:
 bash "$SKILL_DIR/scripts/check-agents.sh"
 ```
 
-This returns JSON with `changes` array showing tasks that changed status. Parse this to trigger notifications or take automated actions.
+This returns JSON with `changes` array showing tasks that changed status.
 
-## Tips
+## Troubleshooting
 
-1. **Use descriptive task descriptions** - The agent only sees your task description, so be specific about what you want.
-
-2. **Batch mode for well-defined tasks** - If you can describe the task completely upfront, use batch mode. It's simpler and auto-converges.
-
-3. **Interactive mode for exploration** - Use interactive when you're not sure exactly what needs to be done and want to guide the agent.
-
-4. **Use `checks.ci_commands` to gate quality** - Specify `--ci-commands` so DoD can validate before completion.
-
-5. **Check logs when things fail** - The full agent transcript is in `~/.agents/agent-swarm/logs/<task-id>.log`
-
-6. **Follow-ups reuse worktrees** - This is efficient and preserves context, but make sure the parent task is terminal first.
-
-7. **Use `status --id` for accurate refresh** - Plain `status` without `--id` returns cached summaries. Use `--id` when you need current state.
-
-## Limitations
-
-- Requires git repository (refuses to run otherwise)
-- Requires tmux (for background session management)
-- Requires at least one agent CLI (codex, claude, or gemini)
-- PR creation requires `gh` or `glab` CLI (falls back to manual URL)
-- Tasks run with `--dangerously-bypass-approvals-and-sandbox` / `--yolo` flags
-- Chinese language used in `next_step` summaries and some prompts
+For common issues, tips, and limitations, see `$SKILL_DIR/references/troubleshooting.md`.
 
 ## Reference Files
 
-For detailed schemas and DoD examples:
-- `$SKILL_DIR/references/state-format.md` - JSON structure documentation
+- `$SKILL_DIR/references/state-format.md` - Task JSON field documentation
 - `$SKILL_DIR/references/dod.json` - DoD spec example
+- `$SKILL_DIR/references/architecture.md` - Internal architecture details
+- `$SKILL_DIR/references/advanced.md` - Advanced usage patterns
+- `$SKILL_DIR/references/troubleshooting.md` - Common issues and tips

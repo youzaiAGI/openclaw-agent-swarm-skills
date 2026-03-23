@@ -1,0 +1,37 @@
+{
+  "skill_name": "openclaw-agent-swarm",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "用 claude agent 在后台异步修改 /Users/youzai/Desktop/openclaw-agent-swarm-skills/README.md 的 description 部分，让它更简洁。",
+      "expected_output": "Agent spawns a task and returns immediately with task ID, without polling or waiting for completion.",
+      "files": [],
+      "expectations": [
+        "Response includes a task ID in format YYYYMMDD-HHMMSS-xxxxxx",
+        "Agent does NOT call check or status after spawn (fire-and-forget)",
+        "Agent informs user that task is running in background"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "帮我并行启动三个后台任务：1) 修改 README.md 的 description 2) 添加一个注释到 CONTRIBUTING.md 3) 更新 LICENSE 的年份",
+      "expected_output": "Agent spawns all three tasks and returns immediately with all task IDs.",
+      "files": [],
+      "expectations": [
+        "At least 3 tasks are spawned",
+        "All task IDs are returned in the response",
+        "Agent does NOT check status after spawning"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "刚才启动的任务完成了吗？",
+      "expected_output": "Agent uses status or list command to check task status when user explicitly asks.",
+      "files": [],
+      "expectations": [
+        "Agent uses swarm.ts status or list command",
+        "Meaningful status information is provided to user"
+      ]
+    }
+  ]
+}
