@@ -1,11 +1,27 @@
 # OpenClaw Agent Swarm
 
+[![GitHub stars](https://img.shields.io/github/stars/youzaiAGI/openclaw-agent-swarm-skills?style=social)](https://github.com/youzaiAGI/openclaw-agent-swarm-skills/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/youzaiAGI/openclaw-agent-swarm-skills?style=social)](https://github.com/youzaiAGI/openclaw-agent-swarm-skills/network/members)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](../skills/openclaw-agent-swarm/scripts/swarm.ts)
 
 **OpenClaw Agent Swarm** 是一个为 AI Agent（Codex、Claude Code、Gemini）设计的执行层，支持通过 **物理隔离**、**执行持久化** 和 **显式状态追踪** 并行处理任务。
 
 [English](../README.md) | 简体中文
+
+---
+
+## ⚡ 30秒上手
+
+```text
+1. 安装：告诉 Claude "安装这个 skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills"
+2. 启动：告诉 Claude "在 ~/my-project 启动一个批处理任务，添加错误处理"
+3. 完成！任务在后台运行，Claude 立即返回任务 ID
+```
+
+**就这么简单！** 无需配置，无需安装脚本。你的 AI Agent 现在可以通过隔离的 git worktree 并行处理任务。
+
+👉 **[使用场景与案例](use-cases.md)** - 功能开发、Bug 修复、重构等真实场景示例。
 
 ---
 

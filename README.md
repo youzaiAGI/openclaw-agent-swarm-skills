@@ -1,11 +1,27 @@
 # OpenClaw Agent Swarm
 
+[![GitHub stars](https://img.shields.io/github/stars/youzaiAGI/openclaw-agent-swarm-skills?style=social)](https://github.com/youzaiAGI/openclaw-agent-swarm-skills/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/youzaiAGI/openclaw-agent-swarm-skills?style=social)](https://github.com/youzaiAGI/openclaw-agent-swarm-skills/network/members)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-blue.svg)](skills/openclaw-agent-swarm/scripts/swarm.ts)
 
 **OpenClaw Agent Swarm** is an execution layer for AI agents (Codex, Claude Code, Gemini) to handle parallel tasks with **physical isolation**, **persistence**, and **explicit state tracking**.
 
 English | [简体中文](docs/README.zh-CN.md)
+
+---
+
+## ⚡ Quick Start in 30 Seconds
+
+```text
+1. Install: Tell Claude "Install this skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills"
+2. Spawn:   Tell Claude "Spawn a batch task in ~/my-project to add error handling"
+3. Done!    Task runs in background, Claude returns immediately with task ID
+```
+
+**That's it!** No config, no setup scripts. Your AI agent now handles parallel tasks with isolated git worktrees.
+
+👉 **[Use Cases & Scenarios](docs/use-cases.md)** - Real-world examples for feature dev, bug fixes, refactoring, and more.
 
 ---
 
