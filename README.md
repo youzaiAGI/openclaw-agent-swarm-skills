@@ -14,7 +14,7 @@ English | [简体中文](docs/README.zh-CN.md)
 ## ⚡ Quick Start in 30 Seconds
 
 ```text
-1. Install: Tell Claude "Install this skill: https://github.com/youzaiAGI/openclaw-agent-swarm-skills"
+1. Install: Tell Claude "Install this skill: [https://github.com/youzaiAGI/openclaw-agent-swarm-skills](https://github.com/youzaiAGI/openclaw-agent-swarm-skills/tree/main/skills/openclaw-agent-swarm) "
 2. Spawn:   Tell Claude "Spawn a batch task in ~/my-project to add error handling"
 3. Done!    Task runs in background, Claude returns immediately with task ID
 ```
